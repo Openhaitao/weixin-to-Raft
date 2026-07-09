@@ -123,11 +123,24 @@ async function assertBadValueBlocksBeforeSubmit(): Promise<void> {
   }
 }
 
+async function assertExtractionPromptUsesCanonicalFieldLayout(): Promise<void> {
+  const prompt = await __wechatProjectCreateTest.buildExtractionPrompt("帮我创建项目", {
+    conversationId: "wx-contract-prompt",
+    text: "帮我创建项目",
+  });
+  assert.match(prompt, /每个 `::field:: 字段名` 必须独占一行，字段值从下一行开始/);
+  assert.match(prompt, /禁止把值写在 field header 同一行/);
+  assert.match(prompt, /::field:: 项目名称\n星海科技\n::field:: 公司创始人\n张三/);
+  assert.match(prompt, /不要写 `::field:: 项目名称 = xxx`/);
+  assert.match(prompt, /也不要写 `::field:: 项目名称：xxx`/);
+}
+
 async function main(): Promise<void> {
   installOptionFixture();
   await assertVendorDriftClean();
   await assertHappyPath();
   await assertBadValueBlocksBeforeSubmit();
+  await assertExtractionPromptUsesCanonicalFieldLayout();
   console.log("card contract vendor + WeChat draft normalization verified");
 }
 
