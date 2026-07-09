@@ -37,7 +37,8 @@
     "login": "tsx main.ts login",
     "start": "tsx main.ts start",
     "test:project-flow": "tsx src/project-create-flow.test.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:contract": "tsx scripts/verify-card-contract.ts"
   },
   "devDependencies": {
     "@types/cross-spawn": "^6.0.6",

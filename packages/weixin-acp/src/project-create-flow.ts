@@ -7,11 +7,23 @@ import path from "node:path";
 import type { ChatRequest, ChatResponse } from "weixin-agent-sdk";
 
 import { extractPdfTextPreview, looksLikePdf } from "./pdf-text.js";
+import {
+  PROJECT_DRAFT_SCHEMA as CORE_PROJECT_DRAFT_SCHEMA,
+  normalizeProjectDraftFieldValues,
+  normalizeProjectDraft,
+  parseCardBlock as parseCoreCardBlock,
+  validateCardIntent,
+  type CardIntent,
+  type CardIntentField,
+  type CardIntentSelectOption,
+  type ProjectDraftFieldNormalizationIssue,
+} from "./vendor/card-intent-core.js";
 
 type DraftField = {
   name: string;
   label: string;
   value?: string;
+  kind?: string;
   required?: boolean;
   hidden?: boolean;
   default?: string;
@@ -34,6 +46,30 @@ type CardBlock = {
   fields: Array<{ name: string; value: string }>;
 };
 
+type SelectOption = {
+  label: string;
+  value: string;
+};
+
+type SelectIssue = {
+  field: string;
+  value: string;
+  options: SelectOption[];
+  reason?: string;
+};
+
+type SelectOptionsByField = Record<string, SelectOption[]>;
+type CoreSelectOptionsByField = Record<string, CardIntentSelectOption[]>;
+
+type DraftNormalization = {
+  fields: Record<string, string>;
+  issues: SelectIssue[];
+};
+
+type SubmitPreparation = DraftNormalization & {
+  submitFields: Record<string, string>;
+};
+
 type BoundFeishuIdentity = {
   userId?: string;
   userUnionId?: string;
@@ -41,29 +77,25 @@ type BoundFeishuIdentity = {
 };
 
 const STATE_TTL_MS = 30 * 60 * 1000;
+const SELECT_OPTION_CACHE_TTL_MS = 10 * 60 * 1000;
+const SELECT_OPTION_FIELDS = ["项目来源", "拟初始融资轮次", "Priority", "地区", "教育背景", "学历背景", "行业大类", "行业", "来源同事"];
+const FIXED_OPTIONS: Record<string, SelectOption[]> = {
+  币种: [
+    { label: "USD", value: "USD" },
+    { label: "CNY", value: "CNY" },
+  ],
+};
 
-const PROJECT_DRAFT_SCHEMA: DraftField[] = [
-  { name: "项目名称", label: "项目名称", required: true },
-  { name: "公司创始人", label: "公司创始人", required: true },
-  { name: "一句话简介", label: "一句话简介", required: true },
-  { name: "Key-Takeaway", label: "Key-Takeaway" },
-  { name: "Priority", label: "Priority Level", required: true, default: "3" },
-  { name: "拟初始融资轮次", label: "拟初始融资轮次", required: true, default: "种子轮" },
-  { name: "计划融资", label: "计划融资(金额)", required: true },
-  { name: "币种", label: "币种", required: true, default: "USD" },
-  { name: "前轮关键投资者", label: "前轮关键投资者" },
-  { name: "项目来源", label: "项目来源", required: true, default: "行研挖掘" },
-  { name: "来源同事", label: "来源同事", required: true },
-  { name: "地区", label: "地区", hidden: true, default: "中国" },
-  { name: "行业大类", label: "行业大类", hidden: true },
-  { name: "行业", label: "行业", hidden: true },
-  { name: "首次接触日期", label: "首次接触日期", hidden: true },
-  { name: "投前估值", label: "投前估值", hidden: true },
-  { name: "投后估值", label: "投后估值", hidden: true },
-  { name: "会议纪要", label: "会议纪要", hidden: true },
-  { name: "教育背景", label: "教育背景(学历)", hidden: true },
-  { name: "学历背景", label: "学历背景", hidden: true },
-];
+let selectOptionCache: { key: string; expiresAt: number; options: SelectOptionsByField } | null = null;
+
+const PROJECT_DRAFT_SCHEMA: DraftField[] = CORE_PROJECT_DRAFT_SCHEMA.map((field) => ({
+  name: field.name,
+  label: field.label,
+  kind: field.kind,
+  required: field.required,
+  hidden: field.hidden,
+  default: field.default,
+}));
 
 const SCHEMA_BY_NAME = new Map(PROJECT_DRAFT_SCHEMA.map((field) => [field.name, field]));
 const VISIBLE_FIELDS = PROJECT_DRAFT_SCHEMA.filter((field) => !field.hidden);
@@ -131,7 +163,21 @@ function formatDraftFieldValue(field: DraftField, value: string): string {
   return clean;
 }
 
-function parseCardBlock(text: string): CardBlock | null {
+function isCardContractEnabled(): boolean {
+  return /^(1|true|yes|on)$/i.test(String(process.env.WEIXIN_AGENT_CARD_CONTRACT || ""));
+}
+
+function cardBlockFromIntent(intent: CardIntent): CardBlock {
+  return {
+    intentType: intent.intentType,
+    fields: (intent.fields || []).map((field) => ({
+      name: field.name,
+      value: String(field.value || ""),
+    })),
+  };
+}
+
+function parseLegacyCardBlock(text: string): CardBlock | null {
   if (!text.includes("::card::")) return null;
 
   const tokenRe = /::(card|field|owner|end)::/g;
@@ -206,6 +252,18 @@ function parseCardBlock(text: string): CardBlock | null {
   return fields.length ? { intentType, fields } : null;
 }
 
+function parseDraftCardBlock(text: string): CardBlock | null {
+  if (!isCardContractEnabled()) return parseLegacyCardBlock(text);
+  const parsed = parseCoreCardBlock(text);
+  if (!parsed || parsed.intentType !== "project_draft") return null;
+  const parsedValidation = validateCardIntent(parsed);
+  if (!parsedValidation.ok) return null;
+  const normalized = normalizeProjectDraft(parsed);
+  const normalizedValidation = validateCardIntent(normalized);
+  if (!normalizedValidation.ok) return null;
+  return cardBlockFromIntent(normalized);
+}
+
 function hasWechatCardProtocol(text: string): boolean {
   return /::(?:card|field|owner|end)::|\[\[[A-Z0-9_:-]+\]\]/.test(text);
 }
@@ -265,14 +323,13 @@ function projectNameFromRequest(request: ChatRequest): string {
 }
 
 function normalizeDraftFields(block: CardBlock, feishuName = "", request?: ChatRequest): Record<string, string> {
-  const provided = new Map<string, string>();
-  for (const field of block.fields) {
-    provided.set(field.name, String(field.value || ""));
-  }
+  const normalized = normalizeProjectDraft({
+    intentType: block.intentType,
+    fields: block.fields.map((field) => ({ name: field.name, value: String(field.value || "") })),
+  });
   const fields: Record<string, string> = {};
-  for (const schema of PROJECT_DRAFT_SCHEMA) {
-    const value = provided.get(schema.name);
-    fields[schema.name] = value && value.trim() ? value : (schema.default ?? "");
+  for (const field of normalized.fields || []) {
+    fields[field.name] = String(field.value || "");
   }
   if (!fields["来源同事"] && feishuName) {
     fields["来源同事"] = feishuName;
@@ -281,6 +338,210 @@ function normalizeDraftFields(block: CardBlock, feishuName = "", request?: ChatR
     fields["项目名称"] = projectNameFromRequest(request);
   }
   return fields;
+}
+
+function normalizeOptionPayload(payload: unknown): SelectOptionsByField {
+  if (!payload || typeof payload !== "object") return {};
+  const out: SelectOptionsByField = {};
+  for (const [fieldName, rawOptions] of Object.entries(payload as Record<string, unknown>)) {
+    if (!Array.isArray(rawOptions)) continue;
+    const seen = new Set<string>();
+    const options: SelectOption[] = [];
+    for (const raw of rawOptions) {
+      if (!raw || typeof raw !== "object") continue;
+      const item = raw as Record<string, unknown>;
+      const label = String(item.label ?? item.text ?? item.name ?? "").trim();
+      const value = String(item.value ?? item.id ?? label).trim();
+      if (!label || !value) continue;
+      const key = `${label}\0${value}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      options.push({ label, value });
+    }
+    if (options.length) out[fieldName] = options;
+  }
+  return out;
+}
+
+function mergeFixedOptions(options: SelectOptionsByField): SelectOptionsByField {
+  const merged: SelectOptionsByField = { ...options };
+  for (const [fieldName, fixed] of Object.entries(FIXED_OPTIONS)) {
+    if (!merged[fieldName]?.length) merged[fieldName] = fixed;
+  }
+  return merged;
+}
+
+function resolveTouziyunOptionsScript(): string {
+  return path.join(path.dirname(resolveTouziyunCreateScript()), "touziyun-options.mjs");
+}
+
+async function fetchTouziyunSelectOptions(identity: BoundFeishuIdentity): Promise<SelectOptionsByField> {
+  const fixture = process.env.WEIXIN_AGENT_TOUZIYUN_OPTIONS_JSON;
+  if (fixture) {
+    try {
+      return mergeFixedOptions(normalizeOptionPayload(JSON.parse(fixture)));
+    } catch {
+      return mergeFixedOptions({});
+    }
+  }
+
+  const userKey = await resolveTouziyunUserKey(identity);
+  if (!userKey) return mergeFixedOptions(selectOptionCache?.options || {});
+
+  const cacheKey = `${userKey}:${SELECT_OPTION_FIELDS.join(",")}`;
+  const now = Date.now();
+  if (selectOptionCache && selectOptionCache.key === cacheKey && selectOptionCache.expiresAt > now) {
+    return mergeFixedOptions(selectOptionCache.options);
+  }
+
+  const script = resolveTouziyunOptionsScript();
+  const result = await new Promise<SelectOptionsByField>((resolve) => {
+    execFile(process.execPath, [script, "--user", userKey, "--fields", SELECT_OPTION_FIELDS.join(",")], {
+      encoding: "utf-8",
+      timeout: 20_000,
+      maxBuffer: 2 * 1024 * 1024,
+    }, (_err, stdout) => {
+      const raw = String(stdout || "").trim();
+      if (!raw) {
+        resolve(selectOptionCache?.options || {});
+        return;
+      }
+      try {
+        const parsed = JSON.parse(raw) as Record<string, unknown>;
+        if (parsed.needAuth || parsed.error) {
+          resolve(selectOptionCache?.options || {});
+          return;
+        }
+        resolve(normalizeOptionPayload(parsed));
+      } catch {
+        resolve(selectOptionCache?.options || {});
+      }
+    });
+  });
+
+  selectOptionCache = {
+    key: cacheKey,
+    expiresAt: now + SELECT_OPTION_CACHE_TTL_MS,
+    options: result,
+  };
+  return mergeFixedOptions(result);
+}
+
+function optionLabels(options: SelectOption[], limit = 24): string {
+  const labels = options.slice(0, limit).map((option) => option.label).join("、");
+  const more = options.length > limit ? ` 等 ${options.length} 个` : "";
+  return `${labels}${more}`;
+}
+
+function toCoreOptionMap(optionsByField: SelectOptionsByField): CoreSelectOptionsByField {
+  const out: CoreSelectOptionsByField = {};
+  for (const [fieldName, options] of Object.entries(optionsByField)) {
+    out[fieldName] = options.map((option) => ({
+      text: option.label,
+      value: option.value,
+    }));
+  }
+  return out;
+}
+
+function toCoreDraftFields(fields: Record<string, string>, optionMap: CoreSelectOptionsByField): CardIntentField[] {
+  return PROJECT_DRAFT_SCHEMA.map((schema) => ({
+    name: schema.name,
+    label: schema.label,
+    value: String(fields[schema.name] || ""),
+    kind: schema.kind as CardIntentField["kind"],
+    required: schema.required,
+    hidden: schema.hidden,
+    options: optionMap[schema.name],
+  }));
+}
+
+function fromCoreDraftFields(fields: CardIntentField[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const field of fields) {
+    out[field.name] = String(field.value || "");
+  }
+  return out;
+}
+
+function selectIssuesFromCore(issues: ProjectDraftFieldNormalizationIssue[], optionsByField: SelectOptionsByField): SelectIssue[] {
+  return issues.map((issue) => ({
+    field: issue.field,
+    value: issue.value,
+    options: optionsByField[issue.field] || [],
+    reason: "select-option-not-found",
+  }));
+}
+
+function displaySelectValues(fields: Record<string, string>, optionsByField: SelectOptionsByField): Record<string, string> {
+  const out = { ...fields };
+  for (const [fieldName, options] of Object.entries(optionsByField)) {
+    const raw = String(out[fieldName] || "").trim();
+    if (!raw) continue;
+    const matched = options.find((option) => option.value === raw || option.label === raw);
+    if (matched) out[fieldName] = matched.label;
+  }
+  return out;
+}
+
+function renderSelectIssuesText(fields: Record<string, string>, draftId: string, issues: SelectIssue[], mode: "draft" | "submit"): string {
+  const header = mode === "submit"
+    ? "以下字段没匹配到投资云选项，未写库："
+    : "草稿已生成，但以下字段没匹配到投资云选项，已先留空（未写库）：";
+  const lines = [header];
+  for (const issue of issues) {
+    lines.push(`- ${issue.field}：${issue.value || "空值"}`);
+    if (issue.options.length) lines.push(`  可选：${optionLabels(issue.options)}`);
+  }
+  lines.push(
+    "",
+    "请回复 `字段名=选项` 修正后再 `确认创建`。",
+    "",
+    renderDraftText(fields, draftId),
+  );
+  return lines.join("\n");
+}
+
+function preserveRejectedSelectValues(
+  rawFields: Record<string, string>,
+  normalized: DraftNormalization,
+): Record<string, string> {
+  if (!normalized.issues.length) return normalized.fields;
+  const persisted = { ...normalized.fields };
+  for (const issue of normalized.issues) {
+    persisted[issue.field] = String(rawFields[issue.field] || issue.value || "");
+  }
+  return persisted;
+}
+
+async function normalizeDraftForTouziyun(fields: Record<string, string>, identity: BoundFeishuIdentity = {}): Promise<DraftNormalization> {
+  if (!isCardContractEnabled()) return { fields: { ...fields }, issues: [] };
+
+  const optionsByField = await fetchTouziyunSelectOptions(identity);
+  const optionMap = toCoreOptionMap(optionsByField);
+  const draftFields = toCoreDraftFields(fields, optionMap);
+  const result = normalizeProjectDraftFieldValues(draftFields, optionMap);
+  return {
+    fields: displaySelectValues(fromCoreDraftFields(draftFields), optionsByField),
+    issues: selectIssuesFromCore(result.issues, optionsByField),
+  };
+}
+
+async function prepareFieldsForSubmit(fields: Record<string, string>, identity: BoundFeishuIdentity = {}): Promise<SubmitPreparation> {
+  const normalized = await normalizeDraftForTouziyun(fields, identity);
+  if (!isCardContractEnabled() || normalized.issues.length) {
+    return { ...normalized, submitFields: fieldsForSubmit(normalized.fields) };
+  }
+
+  const optionsByField = await fetchTouziyunSelectOptions(identity);
+  const optionMap = toCoreOptionMap(optionsByField);
+  const submitDraftFields = toCoreDraftFields(fieldsForSubmit(normalized.fields), optionMap);
+  const result = normalizeProjectDraftFieldValues(submitDraftFields, optionMap);
+  return {
+    fields: normalized.fields,
+    submitFields: fromCoreDraftFields(submitDraftFields),
+    issues: selectIssuesFromCore(result.issues, optionsByField),
+  };
 }
 
 async function buildAttachmentMaterial(request: ChatRequest): Promise<string> {
@@ -830,11 +1091,20 @@ export class WechatProjectCreateFlow {
       }
       const updates = parseFieldUpdates(text);
       if (updates) {
-        const nextFields = { ...existing.fields, ...updates };
-        const next: FlowState = { ...existing, fields: nextFields, updatedAt: Date.now() };
+        const identity = await resolveFeishuIdentity();
+        const candidateFields = { ...existing.fields, ...updates };
+        const normalized = await normalizeDraftForTouziyun(candidateFields, identity);
+        const next: FlowState = {
+          ...existing,
+          fields: preserveRejectedSelectValues(candidateFields, normalized),
+          updatedAt: Date.now(),
+        };
         this.states.set(request.conversationId, next);
         await this.save();
-        return { handled: true, response: { text: renderDraftText(nextFields, existing.draftId) } };
+        if (normalized.issues.length) {
+          return { handled: true, response: { text: renderSelectIssuesText(normalized.fields, existing.draftId, normalized.issues, "draft") } };
+        }
+        return { handled: true, response: { text: renderDraftText(normalized.fields, existing.draftId) } };
       }
       if (isConfirm(text) || isAuthScanned(text)) {
         return { handled: true, response: await this.submitDraft(request.conversationId, existing) };
@@ -863,7 +1133,7 @@ export class WechatProjectCreateFlow {
     const existing = this.states.get(request.conversationId);
     if (!response.text) return response;
 
-    const block = parseCardBlock(response.text);
+    const block = parseDraftCardBlock(response.text);
     if (block?.intentType === "project_draft") {
       return this.createDraftFromBlock(request, block);
     }
@@ -884,7 +1154,9 @@ export class WechatProjectCreateFlow {
 
   private async createDraftFromBlock(request: ChatRequest, block: CardBlock): Promise<ChatResponse> {
     const identity = await resolveFeishuIdentity();
-    const fields = normalizeDraftFields(block, identity.userName || "", request);
+    const initialFields = normalizeDraftFields(block, identity.userName || "", request);
+    const normalized = await normalizeDraftForTouziyun(initialFields, identity);
+    const fields = normalized.fields;
     const draftId = safeDraftId(fields);
     // [WeChat BP mount] If this material carried a BP file, stash a STABLE copy of it now
     // (the /tmp inbound file may be GC'd before the user confirms) so submitDraft can mount
@@ -905,8 +1177,17 @@ export class WechatProjectCreateFlow {
         bpName = name;
       }
     }
-    this.states.set(request.conversationId, { phase: "draft", draftId, fields, updatedAt: Date.now(), ...(bpPath ? { bpPath, bpName } : {}) });
+    this.states.set(request.conversationId, {
+      phase: "draft",
+      draftId,
+      fields: preserveRejectedSelectValues(initialFields, normalized),
+      updatedAt: Date.now(),
+      ...(bpPath ? { bpPath, bpName } : {}),
+    });
     await this.save();
+    if (normalized.issues.length) {
+      return { text: renderSelectIssuesText(fields, draftId, normalized.issues, "draft") };
+    }
     return { text: renderDraftText(fields, draftId) };
   }
 
@@ -917,7 +1198,24 @@ export class WechatProjectCreateFlow {
   }
 
   private async submitDraft(conversationId: string, state: Extract<FlowState, { phase: "draft" }>): Promise<ChatResponse> {
-    const missing = missingRequired(state.fields);
+    const identity = await resolveFeishuIdentity();
+    const prepared = await prepareFieldsForSubmit(state.fields, identity);
+    const missing = missingRequired(prepared.fields);
+    if (prepared.issues.length) {
+      state = {
+        ...state,
+        fields: preserveRejectedSelectValues(state.fields, prepared),
+        updatedAt: Date.now(),
+      };
+      this.states.set(conversationId, state);
+      await this.save();
+      return { text: renderSelectIssuesText(prepared.fields, state.draftId, prepared.issues, "submit") };
+    }
+    if (JSON.stringify(prepared.fields) !== JSON.stringify(state.fields)) {
+      state = { ...state, fields: prepared.fields, updatedAt: Date.now() };
+      this.states.set(conversationId, state);
+      await this.save();
+    }
 
     if (state.authStartedAt) {
       const poll = await pollTouziyunTextAuth();
@@ -927,7 +1225,7 @@ export class WechatProjectCreateFlow {
       await this.save();
     }
 
-    const result = await runTouziyunSubmit({ draftId: state.draftId, fields: fieldsForSubmit(state.fields) });
+    const result = await runTouziyunSubmit({ draftId: state.draftId, fields: prepared.submitFields });
     if (result.ok) {
       const written = Array.isArray(result.written) ? result.written.length : 0;
       const skipped = Array.isArray(result.skipped) ? result.skipped.length : 0;
@@ -1017,3 +1315,13 @@ export class WechatProjectCreateFlow {
     }
   }
 }
+
+export const __wechatProjectCreateTest = {
+  parseDraftCardBlock,
+  normalizeDraftFields,
+  normalizeDraftForTouziyun,
+  prepareFieldsForSubmit,
+  preserveRejectedSelectValues,
+  renderDraftText,
+  renderSelectIssuesText,
+};
