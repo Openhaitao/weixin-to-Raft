@@ -1,6 +1,6 @@
 // Vendored from LinearOS src/card/card-intent-core.ts
-// source commit: 3f55ecd20d3894c2cf1ac39a47f074542d54bd23
-// source sha256: f41d943fc80ebef9b9184c2ca330c7eedfaff13075e9df834c08688b1ae9ee15
+// source commit: 08622eaeab7c858a321e594109d0456031feabaf
+// source sha256: e07282763a6c9a4636e32fbea88a5b7b8dec15bee9d3ed1217ad7418fac86506
 // Do not edit by hand; run the drift sentinel after refreshing this file.
 // @ts-nocheck
 
@@ -172,13 +172,14 @@ export function isRegisteredIntent(intentType: string): boolean {
 /** Fail-closed validation: unknown intentType / no fields → not ok (don't render
  * garbage). The caller renders the card ONLY when ok.
  *
- * IMPORTANT: required fields (e.g. 项目名称) are enforced at SUBMIT time by the
- * Feishu form (required:true input), NOT at render time. The draft card is
+ * IMPORTANT: individual required fields (e.g. 项目名称) are enforced at SUBMIT
+ * time by the Feishu form (required:true input), NOT at render time. The draft card is
  * EDITABLE — an empty required field must still render (placeholder 待补充) so the
  * user can fill it. Blocking render on an empty required value was a real bug: the
  * model legitimately leaves 项目名称 blank when no name is in the material, which
- * made the card never render AND leaked the raw ::card:: block to the user. So we
- * do NOT gate rendering on required-field values. */
+ * made the card never render AND leaked the raw ::card:: block to the user. We do
+ * reject a project_draft with no non-empty canonical required value at all: that
+ * is a parser-empty shell, not a useful editable draft. */
 export function validateCardIntent(intent: CardIntent | null | undefined): CardIntentValidation {
   if (!intent || typeof intent !== 'object') return { ok: false, error: 'intent-missing' };
   if (!intent.intentType || !isRegisteredIntent(intent.intentType)) {
@@ -222,6 +223,15 @@ export function validateCardIntent(intent: CardIntent | null | undefined): CardI
     }
     return { ok: true };
   }
+  if (intent.intentType === 'project_draft') {
+    const hasRequiredValue = Array.isArray(intent.fields)
+      && intent.fields.some((field) => PROJECT_DRAFT_REQUIRED_NAMES.has(field.name)
+        && String(field.value ?? '').trim() !== '');
+    if (!hasRequiredValue) {
+      return { ok: false, error: 'project-draft-required-values-empty' };
+    }
+    return { ok: true };
+  }
   if (!Array.isArray(intent.fields) || intent.fields.length === 0) {
     return { ok: false, error: 'fields-empty' };
   }
@@ -246,7 +256,7 @@ export function pointerFor(intentType: string): string {
  * + injectSelectOptions expect — they are the form_value keys. (Mirrors the 20-field
  * set the skill used to hand-write as JSON.)
  */
-interface SchemaField {
+export interface ProjectDraftSchemaField {
   name: string;
   label: string;
   kind: DraftKind;
@@ -254,7 +264,7 @@ interface SchemaField {
   hidden?: boolean;
   default?: string;
 }
-export const PROJECT_DRAFT_SCHEMA: SchemaField[] = [
+export const PROJECT_DRAFT_SCHEMA: ProjectDraftSchemaField[] = [
   { name: '项目名称', label: '项目名称', kind: 'single', required: true },
   { name: '公司创始人', label: '公司创始人', kind: 'single', required: true },
   { name: '一句话简介', label: '一句话简介', kind: 'single', required: true },
@@ -276,6 +286,89 @@ export const PROJECT_DRAFT_SCHEMA: SchemaField[] = [
   { name: '教育背景', label: '教育背景(学历)', kind: 'select', hidden: true },
   { name: '学历背景', label: '学历背景', kind: 'single', hidden: true },
 ];
+
+const PROJECT_DRAFT_REQUIRED_NAMES = new Set(
+  PROJECT_DRAFT_SCHEMA.filter((field) => field.required).map((field) => field.name),
+);
+
+const PROJECT_DRAFT_INLINE_KEYS = PROJECT_DRAFT_SCHEMA
+  .flatMap((field) => [
+    { key: field.name, field },
+    ...(field.label === field.name ? [] : [{ key: field.label, field }]),
+  ])
+  .sort((a, b) => b.key.length - a.key.length);
+
+export type DraftReplyKind = 'confirm' | 'cancel' | 'edit' | 'auth-scanned' | 'none';
+
+export interface DraftReplyClassification {
+  kind: DraftReplyKind;
+  updates?: Record<string, string>;
+}
+
+function resolveProjectDraftEditField(
+  key: string,
+  schema: readonly ProjectDraftSchemaField[],
+): ProjectDraftSchemaField | undefined {
+  const visibleFields = schema.filter((field) => !field.hidden);
+  const index = Number(key);
+  if (Number.isInteger(index) && index >= 1 && index <= visibleFields.length) {
+    return visibleFields[index - 1];
+  }
+  return schema.find((field) => field.name === key)
+    ?? schema.find((field) => field.label === key);
+}
+
+/**
+ * Parse a project-draft text edit into the same updates map used by interactive
+ * callbacks. Numeric indexes address only non-hidden fields in schema order;
+ * exact field names and labels can address any schema field. A multiline field
+ * consumes the rest of the message so values such as Key-Takeaway stay intact.
+ */
+export function parseFieldEditCommand(
+  text: string,
+  schema: readonly ProjectDraftSchemaField[] = PROJECT_DRAFT_SCHEMA,
+): Record<string, string> | null {
+  const updates: Record<string, string> = {};
+  const lines = String(text ?? '').split(/\r?\n/);
+
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+    const line = lines[lineIndex].trim().replace(/^修改\s*/u, '');
+    const match = line.match(/^(.+?)(?:=|：|:)([\s\S]*)$/u);
+    if (!match) continue;
+
+    const field = resolveProjectDraftEditField(match[1].trim(), schema);
+    if (!field) continue;
+
+    if (field.kind === 'multiline') {
+      const remainder = [match[2], ...lines.slice(lineIndex + 1)].join('\n').trim();
+      updates[field.name] = remainder;
+      break;
+    }
+    updates[field.name] = match[2].trim();
+  }
+
+  return Object.keys(updates).length ? updates : null;
+}
+
+/** Normalize WeChat text replies and adapter callback payloads to one event shape. */
+export function classifyDraftReply(
+  text: string,
+  schema: readonly ProjectDraftSchemaField[] = PROJECT_DRAFT_SCHEMA,
+): DraftReplyClassification {
+  const trimmed = String(text ?? '').trim();
+  if (/^(确认创建|确认提交|提交到投资云|创建项目|确认)$/i.test(trimmed)) {
+    return { kind: 'confirm' };
+  }
+  if (/^(取消|先不建|不创建|放弃)$/i.test(trimmed)) {
+    return { kind: 'cancel' };
+  }
+  if (/^(已扫码|扫码完成|扫完了|我扫了|已完成授权)$/i.test(trimmed)) {
+    return { kind: 'auth-scanned' };
+  }
+  const updates = parseFieldEditCommand(trimmed, schema);
+  if (updates) return { kind: 'edit', updates };
+  return { kind: 'none' };
+}
 
 export interface CardIntentSelectOption {
   text: string;
@@ -870,6 +963,16 @@ export function parseCardBlock(text: string): CardIntent | null {
     cur = null;
     valueLines = [];
   };
+  const parseInlineField = (header: string): { field: ProjectDraftSchemaField; value: string } | null => {
+    if (intentType !== 'project_draft') return null;
+    for (const candidate of PROJECT_DRAFT_INLINE_KEYS) {
+      if (!header.startsWith(candidate.key)) continue;
+      const remainder = header.slice(candidate.key.length);
+      const assignment = remainder.match(/^\s*(?:=|：|:)\s*([\s\S]*)$/u);
+      if (assignment) return { field: candidate.field, value: assignment[1] };
+    }
+    return null;
+  };
 
   for (const line of bodyLines) {
     if (/^\s*::end::\s*$/.test(line)) {
@@ -884,6 +987,18 @@ export function parseCardBlock(text: string): CardIntent | null {
     const fh = line.match(/^\s*::field::\s*(.*)$/);
     if (fh) {
       flush();
+      const inline = parseInlineField(fh[1]);
+      if (inline) {
+        cur = {
+          name: inline.field.name,
+          label: inline.field.label,
+          kind: inline.field.kind,
+          required: inline.field.required,
+          hidden: inline.field.hidden,
+        };
+        valueLines = [inline.value];
+        continue;
+      }
       const parts = fh[1].split('|').map((s) => s.trim());
       const name = parts[0] || '';
       const kindRaw = (parts[1] || '').toLowerCase();
