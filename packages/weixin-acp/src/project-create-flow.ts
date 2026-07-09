@@ -70,7 +70,12 @@ const VISIBLE_FIELDS = PROJECT_DRAFT_SCHEMA.filter((field) => !field.hidden);
 
 function isProjectCreateCommand(text: string): boolean {
   const trimmed = text.trim();
-  return trimmed === "/项目创建" || trimmed.startsWith("/项目创建 ");
+  return /^\/项目创建(?:\s|$)/.test(trimmed);
+}
+
+function projectCreateInlineMaterial(text: string): string {
+  const match = text.trim().match(/^\/项目创建(?:\s+([\s\S]*))?$/);
+  return match?.[1]?.trim() || "";
 }
 
 function isNaturalProjectCreateIntent(text: string): boolean {
@@ -97,7 +102,7 @@ function hasMaterial(request: ChatRequest): boolean {
 }
 
 function hasConcreteMaterial(request: ChatRequest): boolean {
-  return Boolean(request.media || request.text.includes("【Material Inbox /"));
+  return Boolean(request.media || request.text.includes("【Material Inbox /") || projectCreateInlineMaterial(request.text));
 }
 
 function hasFeishuId(value: string | undefined): boolean {
@@ -218,6 +223,36 @@ function stripWechatCardProtocol(text: string): string {
     "这条回复包含飞书卡片协议，微信通道已拦截，没有把协议原文发给你。",
     "请用文字说明要继续的动作；如果是在创建项目，请发送 `/项目创建` 后重新发送材料。",
   ].join("\n");
+}
+
+function compactDraftText(text: string, maxChars = 1200): string {
+  const clean = text
+    .replace(/\r\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  return clean.length > maxChars ? `${clean.slice(0, maxChars).trim()}...` : clean;
+}
+
+function firstUsefulLine(text: string, maxChars = 80): string {
+  const line = text
+    .split(/\n+/)
+    .map((part) => part.replace(/^[-*#\s]+/, "").trim())
+    .find(Boolean) || "";
+  return line.length > maxChars ? `${line.slice(0, maxChars).trim()}...` : line;
+}
+
+function fallbackDraftBlockFromText(request: ChatRequest, text: string): CardBlock {
+  const clean = compactDraftText(stripWechatCardProtocol(text));
+  const firstLine = firstUsefulLine(clean);
+  const projectName = projectNameFromRequest(request) || firstLine || "微信项目草稿";
+  return {
+    intentType: "project_draft",
+    fields: [
+      { name: "项目名称", value: projectName },
+      { name: "一句话简介", value: firstLine || "用户发送的材料已收到，需继续补充项目信息。" },
+      { name: "Key-Takeaway", value: clean || "材料已收到，但模型没有稳定输出结构化字段；请按下方字段补充或修改。" },
+    ],
+  };
 }
 
 function projectNameFromRequest(request: ChatRequest): string {
@@ -834,12 +869,7 @@ export class WechatProjectCreateFlow {
     }
 
     if (existing?.phase === "awaiting_material") {
-      return {
-        text: [
-          "这份材料我收到了，但没有稳定生成可确认的项目草稿。",
-          "请补一句项目名称/创始人/融资信息，或重新发送材料后再试。",
-        ].join("\n"),
-      };
+      return this.createDraftFromBlock(request, fallbackDraftBlockFromText(request, response.text));
     }
 
     if (hasWechatCardProtocol(response.text)) {
