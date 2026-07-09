@@ -40,6 +40,41 @@ npx weixin-acp start -- kimi acp
 
 `--` 后面的部分就是你的 ACP agent 启动命令，`weixin-acp` 会自动以子进程方式启动它，通过 JSON-RPC over stdio 进行通信。
 
+### LinearOS / AgentOS 微信通道绑定
+
+本仓库提供一个最小脚本，用来验证和启动「指定 LinearOS bot 独立扫码绑定微信」：
+
+```bash
+# 先构建本地 CLI
+pnpm -r run build
+
+# 查看指定 bot 的微信绑定状态
+node scripts/wechat-bind-demo.mjs status hel9000
+
+# 为指定 bot 生成微信扫码登录二维码，登录态写入 ~/.linearos/agents/hel9000/channels/wechat/
+node scripts/wechat-bind-demo.mjs login hel9000
+
+# 用同一个 bot persona 启动微信 sidecar（默认 codex-acp）
+node scripts/wechat-bind-demo.mjs start hel9000
+
+# 或使用其他 ACP agent
+node scripts/wechat-bind-demo.mjs start hel9000 -- claude-agent-acp
+```
+
+脚本用于 LinearOS 飞书 `/wechat` 绑定后的 sidecar：
+
+- 每个 bot 使用独立状态目录：`~/.linearos/agents/<slug>/channels/wechat/`
+- 微信登录态不写入 `~/.openclaw`，也不写入 LinearOS shared 目录
+- 脚本会从 `~/.linearos/agents/<slug>/config.env` 和 `profile/profile.json` 读取 bot persona
+- 脚本会生成 `~/.linearos/agents/<slug>/channels/wechat/CLAUDE.md`，并通过 `--system-prompt-file` 注入 ACP 新会话
+- 微信 prompt 明确禁止输出 `::card::`、`::field::`、`[[...]]` 等飞书卡片协议；项目创建在微信侧必须走文字草稿
+- 微信侧支持 `/clear` 清理当前用户会话上下文
+
+双栈对齐清单：
+
+- 改 LinearOS 飞书侧的投资云/权限/身份/确认卡写入路径时，必须同步核对微信 sidecar 是否有同款路径。
+- 用户确认后的系统写入子进程必须使用 `process.execPath`；不要走 PATH 里的 `node`，避免被模型直写保护包装器误拦。
+
 更多 ACP 兼容 agent 请参考 [ACP agent 列表](https://agentclientprotocol.com/get-started/agents)。
 
 ## 自定义 Agent

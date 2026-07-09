@@ -36,6 +36,7 @@
     "prepublishOnly": "pnpm run build",
     "login": "tsx main.ts login",
     "start": "tsx main.ts start",
+    "test:project-flow": "tsx src/project-create-flow.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {

@@ -1,12 +1,11 @@
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 
 import type { ChatResponse } from "weixin-agent-sdk";
 import type { SessionNotification } from "@agentclientprotocol/sdk";
 
-const ACP_MEDIA_OUT_DIR = path.join(os.tmpdir(), "weixin-agent/media/acp-out");
+const ACP_MEDIA_OUT_DIR = "/tmp/weixin-agent/media/acp-out";
 
 /**
  * Collects sessionUpdate notifications for a single prompt round-trip
@@ -15,6 +14,8 @@ const ACP_MEDIA_OUT_DIR = path.join(os.tmpdir(), "weixin-agent/media/acp-out");
 export class ResponseCollector {
   private textChunks: string[] = [];
   private imageData: { base64: string; mimeType: string } | null = null;
+  private firstContentAt: number | null = null;
+  private lastContentAt: number | null = null;
 
   /**
    * Feed a sessionUpdate notification into the collector.
@@ -26,8 +27,10 @@ export class ResponseCollector {
       const content = update.content;
 
       if (content.type === "text") {
+        this.markContentSeen(content.text);
         this.textChunks.push(content.text);
       } else if (content.type === "image") {
+        this.markContentSeen("image");
         this.imageData = {
           base64: content.data,
           mimeType: content.mimeType,
@@ -57,5 +60,22 @@ export class ResponseCollector {
     }
 
     return response;
+  }
+
+  getFirstContentAt(): number | null {
+    return this.firstContentAt;
+  }
+
+  getLastContentAt(): number | null {
+    return this.lastContentAt;
+  }
+
+  private markContentSeen(content: string): void {
+    if (!content) return;
+    const now = Date.now();
+    if (this.firstContentAt === null) {
+      this.firstContentAt = now;
+    }
+    this.lastContentAt = now;
   }
 }

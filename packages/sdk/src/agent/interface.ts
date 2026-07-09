@@ -9,6 +9,8 @@
 export interface Agent {
   /** Process a single message and return a reply. */
   chat(request: ChatRequest): Promise<ChatResponse>;
+  /** Optional fast preflight for whether this inbound message should show a typing indicator. */
+  shouldShowTyping?(request: ChatRequest): Promise<boolean> | boolean;
   /** Clear/reset the session for a given conversation. */
   clearSession?(conversationId: string): void;
 }
@@ -18,6 +20,11 @@ export interface ChatRequest {
   conversationId: string;
   /** Text content of the message. */
   text: string;
+  /** Channel timing markers for live cold-start diagnosis. */
+  timing?: {
+    /** Time when the SDK started processing this inbound message. */
+    receivedAt?: number;
+  };
   /** Attached media file (image, audio, video, or generic file). */
   media?: {
     type: "image" | "audio" | "video" | "file";

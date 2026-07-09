@@ -5,6 +5,7 @@
  * - /echo <message>         直接回复消息（不经过 AI），并附带通道耗时统计
  * - /toggle-debug           开关 debug 模式，启用后每条 AI 回复追加全链路耗时
  * - /clear                  清除当前会话，重新开始对话
+ * - /new                    /clear 的别名，开启当前微信用户的新会话
  */
 import type { WeixinApiOptions } from "../api/api.js";
 import { logger } from "../util/logger.js";
@@ -101,6 +102,11 @@ export async function handleSlashCommand(
       case "/clear": {
         ctx.onClear?.();
         await sendReply(ctx, "✅ 会话已清除，重新开始对话");
+        return { handled: true };
+      }
+      case "/new": {
+        ctx.onClear?.();
+        await sendReply(ctx, "新会话已开始。我会从下一条消息开始按新的上下文处理。");
         return { handled: true };
       }
       default:

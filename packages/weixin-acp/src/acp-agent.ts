@@ -4,7 +4,9 @@ import type { SessionId } from "@agentclientprotocol/sdk";
 import type { AcpAgentOptions } from "./types.js";
 import { AcpConnection } from "./acp-connection.js";
 import { convertRequestToContentBlocks } from "./content-converter.js";
+import { WechatProjectCreateFlow } from "./project-create-flow.js";
 import { ResponseCollector } from "./response-collector.js";
+import { isBareMaterialRequest, isMaterialInboxCancelText, MaterialInbox } from "./material-inbox.js";
 
 function log(msg: string) {
   console.log(`[acp] ${msg}`);
@@ -17,6 +19,9 @@ function log(msg: string) {
 export class AcpAgent implements Agent {
   private connection: AcpConnection;
   private sessions = new Map<string, SessionId>();
+  private systemPromptSent = new Set<string>();
+  private projectCreateFlow = new WechatProjectCreateFlow();
+  private materialInbox = new MaterialInbox();
   private options: AcpAgentOptions;
 
   constructor(options: AcpAgentOptions) {
@@ -24,19 +29,72 @@ export class AcpAgent implements Agent {
     this.connection = new AcpConnection(options, () => {
       log("subprocess exited, clearing session cache");
       this.sessions.clear();
+      this.systemPromptSent.clear();
     });
   }
 
+  async shouldShowTyping(request: ChatRequest): Promise<boolean> {
+    if (isBareMaterialRequest(request)) {
+      return this.projectCreateFlow.isAwaitingMaterial(request.conversationId);
+    }
+    return true;
+  }
+
   async chat(request: ChatRequest): Promise<ChatResponse> {
+    const routed = await this.projectCreateFlow.beforeAgent(request);
+    if (routed.handled) {
+      return routed.response;
+    }
+    request = routed.request;
+
+    if (isBareMaterialRequest(request)) {
+      this.materialInbox.stash(request);
+      log(`material inbox stashed conversation=${request.conversationId} media=${request.media?.type || "text"}`);
+      return {};
+    }
+
+    let mergedMaterial = false;
+    if (this.materialInbox.has(request.conversationId)) {
+      if (isMaterialInboxCancelText(request.text)) {
+        this.materialInbox.clear(request.conversationId);
+        log(`material inbox cleared conversation=${request.conversationId}`);
+      } else {
+        request = this.materialInbox.mergeInto(request);
+        mergedMaterial = true;
+        log(`material inbox merged conversation=${request.conversationId}`);
+      }
+    }
+
+    if (mergedMaterial) {
+      const rerouted = await this.projectCreateFlow.beforeAgent(request, { allowNaturalProjectCreate: true });
+      if (rerouted.handled) {
+        return rerouted.response;
+      }
+      request = rerouted.request;
+    }
+
     const conn = await this.connection.ensureReady();
 
     // Get or create an ACP session for this conversation
-    const sessionId = await this.getOrCreateSession(request.conversationId, conn);
+    const sessionId = await this.getOrCreateSession(request.conversationId, conn, request.timing?.receivedAt);
 
     // Convert the ChatRequest to ACP ContentBlock[]
     const blocks = await convertRequestToContentBlocks(request);
     if (blocks.length === 0) {
       return { text: "" };
+    }
+
+    if (this.options.systemPrompt && !this.systemPromptSent.has(request.conversationId)) {
+      blocks.unshift({
+        type: "text",
+        text: [
+          "[System instructions]",
+          this.options.systemPrompt.trim(),
+          "",
+          "[User message]",
+        ].join("\n"),
+      });
+      this.systemPromptSent.add(request.conversationId);
     }
 
     // Register a collector, send the prompt, then gather the response
@@ -45,13 +103,18 @@ export class AcpAgent implements Agent {
 
     const collector = new ResponseCollector();
     this.connection.registerCollector(sessionId, collector);
+    const promptStart = Date.now();
     try {
       await conn.prompt({ sessionId, prompt: blocks });
     } finally {
       this.connection.unregisterCollector(sessionId);
     }
+    const promptDoneAt = Date.now();
+    const firstContentAt = collector.getFirstContentAt();
+    log(`[timing] acp_prompt_to_first_token_ms=${firstContentAt === null ? "n/a" : firstContentAt - promptStart}`);
+    log(`[timing] acp_prompt_to_final_reply_ms=${promptDoneAt - promptStart}`);
 
-    const response = await collector.toResponse();
+    const response = await this.projectCreateFlow.afterAgent(request, await collector.toResponse());
     log(`response: ${response.text?.slice(0, 80) ?? "[no text]"}${response.media ? " +media" : ""}`);
     return response;
   }
@@ -59,6 +122,7 @@ export class AcpAgent implements Agent {
   private async getOrCreateSession(
     conversationId: string,
     conn: Awaited<ReturnType<AcpConnection["ensureReady"]>>,
+    receivedAt?: number,
   ): Promise<SessionId> {
     const existing = this.sessions.get(conversationId);
     if (existing) return existing;
@@ -68,6 +132,10 @@ export class AcpAgent implements Agent {
       cwd: this.options.cwd ?? process.cwd(),
       mcpServers: [],
     });
+    const createdAt = Date.now();
+    if (receivedAt !== undefined) {
+      log(`[timing] first_wechat_message_to_acp_session_created_ms=${createdAt - receivedAt}`);
+    }
     log(`session created: ${res.sessionId}`);
     this.sessions.set(conversationId, res.sessionId);
     return res.sessionId;
@@ -84,6 +152,9 @@ export class AcpAgent implements Agent {
       this.connection.unregisterCollector(sessionId);
       this.sessions.delete(conversationId);
     }
+    this.systemPromptSent.delete(conversationId);
+    this.materialInbox.clear(conversationId);
+    void this.projectCreateFlow.reset(conversationId);
   }
 
   /**
@@ -91,6 +162,7 @@ export class AcpAgent implements Agent {
    */
   dispose(): void {
     this.sessions.clear();
+    this.systemPromptSent.clear();
     this.connection.dispose();
   }
 }

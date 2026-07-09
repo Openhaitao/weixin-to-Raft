@@ -160,6 +160,7 @@ export async function processOneMessage(
           type: "file",
           filePath: downloaded.decryptedFilePath,
           mimeType: downloaded.fileMediaType ?? "application/octet-stream",
+          fileName: mediaItem.file_item?.file_name ?? undefined,
         };
       } else if (downloaded.decryptedVoicePath) {
         media = {
@@ -177,6 +178,7 @@ export async function processOneMessage(
   const request: ChatRequest = {
     conversationId: full.from_user_id ?? "",
     text: bodyFromItemList(full.item_list),
+    timing: { receivedAt },
     media,
   };
 
@@ -195,7 +197,10 @@ export async function processOneMessage(
       },
     }).catch(() => {});
   };
-  if (deps.typingTicket) {
+  const showTyping = deps.agent.shouldShowTyping
+    ? await deps.agent.shouldShowTyping(request)
+    : true;
+  if (deps.typingTicket && showTyping) {
     startTyping();
     typingTimer = setInterval(startTyping, 10_000);
   }
