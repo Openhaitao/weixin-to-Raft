@@ -31,6 +31,10 @@ export type LoginOptions = {
   baseUrl?: string;
   /** Log callback (defaults to console.log). */
   log?: (msg: string) => void;
+  /** Called as soon as the QR URL is available. */
+  onQr?: (result: { qrcodeUrl?: string; sessionKey: string; message: string }) => void | Promise<void>;
+  /** Print a terminal QR code. Defaults to true for CLI use. */
+  printQr?: boolean;
 };
 
 export type StartOptions = {
@@ -63,17 +67,20 @@ export async function login(opts?: LoginOptions): Promise<string> {
     throw new Error(startResult.message);
   }
 
-  log("\n使用微信扫描以下二维码，以完成连接：\n");
-  try {
-    const qrcodeterminal = await import("qrcode-terminal");
-    await new Promise<void>((resolve) => {
-      qrcodeterminal.default.generate(startResult.qrcodeUrl!, { small: true }, (qr: string) => {
-        console.log(qr);
-        resolve();
+  await opts?.onQr?.(startResult);
+  if (opts?.printQr !== false) {
+    log("\n使用微信扫描以下二维码，以完成连接：\n");
+    try {
+      const qrcodeterminal = await import("qrcode-terminal");
+      await new Promise<void>((resolve) => {
+        qrcodeterminal.default.generate(startResult.qrcodeUrl!, { small: true }, (qr: string) => {
+          console.log(qr);
+          resolve();
+        });
       });
-    });
-  } catch {
-    log(`二维码链接: ${startResult.qrcodeUrl}`);
+    } catch {
+      log(`二维码链接: ${startResult.qrcodeUrl}`);
+    }
   }
 
   log("\n等待扫码...\n");
@@ -267,6 +274,13 @@ export function start(agent: Agent, opts?: StartOptions): Bot {
   }
 
   log(`[weixin] 启动 bot, account=${account.accountId}`);
+  const sidecarReadyAt = Date.now();
+  process.env.WEIXIN_AGENT_SIDECAR_READY_AT = String(sidecarReadyAt);
+  const bindCompletedAt = Number(process.env.WEIXIN_AGENT_BIND_COMPLETED_AT);
+  if (Number.isFinite(bindCompletedAt) && bindCompletedAt > 0) {
+    log(`[timing] qr_scan_success_to_sidecar_ready_ms=${sidecarReadyAt - bindCompletedAt}`);
+  }
+  log(`[timing] sidecar_ready_at_ms=${sidecarReadyAt}`);
 
   const monitorPromise = monitorWeixinProvider({
     baseUrl: account.baseUrl,

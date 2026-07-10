@@ -4,12 +4,17 @@ import type { SessionId } from "@agentclientprotocol/sdk";
 import type { AcpAgentOptions } from "./types.js";
 import { AcpConnection } from "./acp-connection.js";
 import { convertRequestToContentBlocks } from "./content-converter.js";
-import { WechatProjectCreateFlow } from "./project-create-flow.js";
+import { WechatProjectCreateFlow } from "./linearos/project-create-flow.js";
 import { ResponseCollector } from "./response-collector.js";
-import { isBareMaterialRequest, isMaterialInboxCancelText, MaterialInbox } from "./material-inbox.js";
+import { isBareMaterialRequest, isMaterialInboxCancelText, MaterialInbox } from "./linearos/material-inbox.js";
 
 function log(msg: string) {
   console.log(`[acp] ${msg}`);
+}
+
+function isEmptyUserContentError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /user messages must have non-empty content/.test(message);
 }
 
 /**
@@ -106,6 +111,16 @@ export class AcpAgent implements Agent {
     const promptStart = Date.now();
     try {
       await conn.prompt({ sessionId, prompt: blocks });
+    } catch (err) {
+      this.sessions.delete(request.conversationId);
+      this.systemPromptSent.delete(request.conversationId);
+      if (isEmptyUserContentError(err)) {
+        log(`prompt failed: empty user content; reset conversation=${request.conversationId}`);
+        return {
+          text: "我刚才收到的这条文件消息没有成功进入模型。请重新发一次文件，或补一句要我用这个文件做什么。",
+        };
+      }
+      throw err;
     } finally {
       this.connection.unregisterCollector(sessionId);
     }

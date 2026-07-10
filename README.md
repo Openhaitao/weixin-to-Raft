@@ -75,6 +75,17 @@ node scripts/wechat-bind-demo.mjs start hel9000 -- claude-agent-acp
 - 改 LinearOS 飞书侧的投资云/权限/身份/确认卡写入路径时，必须同步核对微信 sidecar 是否有同款路径。
 - 用户确认后的系统写入子进程必须使用 `process.execPath`；不要走 PATH 里的 `node`，避免被模型直写保护包装器误拦。
 
+LinearOS 微信回归门禁：
+
+- WX-2 协议 strip：`testProjectDraftConvertsOutsideAwaitingMaterial`、`testOtherCardProtocolsAreStripped`
+- 刀0 fallback draft：`testAwaitingMaterialBadDraftGetsFallbackDraft`
+- card contract vendor + drift sentinel：`assertVendorDriftClean`、`assertHappyPath`
+- 归一化和提交前校验：`assertHappyPath`、`assertBadValueBlocksBeforeSubmit`
+- QR 双 upload shape：`assertUploadShapes`
+- extraction prompt 加固：`assertExtractionPromptUsesCanonicalFieldLayout`、`testInlineMaterialStartsExtractionInsteadOfAskingAgain`
+
+统一运行：`pnpm test:linearos`。LinearOS 专属实现位于 `packages/weixin-acp/src/linearos/`；CI 同时禁止 `packages/agent-acp` 和旧入口引用回生。upstream drift workflow 只报警，不自动合并。
+
 更多 ACP 兼容 agent 请参考 [ACP agent 列表](https://agentclientprotocol.com/get-started/agents)。
 
 ## 自定义 Agent

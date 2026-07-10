@@ -4,7 +4,7 @@ import path from "node:path";
 import type { ChatRequest } from "weixin-agent-sdk";
 import type { ContentBlock } from "@agentclientprotocol/sdk";
 
-import { extractPdfTextPreview, looksLikePdf } from "./pdf-text.js";
+import { extractPdfTextPreview, looksLikePdf } from "./linearos/pdf-text.js";
 
 async function localMediaNotice(request: ChatRequest): Promise<string> {
   const media = request.media;

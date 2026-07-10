@@ -89,7 +89,15 @@ async function startAgent(acpCommand: string, acpArgs: string[] = [], opts: CliO
 
 async function main() {
   if (command === "login") {
-    await login();
+    const json = process.argv.includes("--json");
+    const accountId = await login({
+      printQr: !json,
+      log: json ? (message) => console.error(message) : console.log,
+      onQr: json
+        ? (result) => console.log(`WEIXIN_LOGIN_QR ${JSON.stringify(result)}`)
+        : undefined,
+    });
+    if (json) console.log(`WEIXIN_LOGIN_DONE ${JSON.stringify({ accountId })}`);
     return;
   }
 
@@ -125,6 +133,7 @@ async function main() {
 
 用法:
   npx weixin-acp login                          扫码登录微信
+  npx weixin-acp login --json                   输出结构化二维码事件并等待扫码
   npx weixin-acp logout                         退出登录
   npx weixin-acp claude-code                     使用 Claude Code
   npx weixin-acp codex                           使用 Codex

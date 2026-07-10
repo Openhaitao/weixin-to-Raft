@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { __wechatProjectCreateTest } from "../src/project-create-flow.ts";
+import { __wechatProjectCreateTest } from "../src/linearos/project-create-flow.ts";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const packageRoot = path.resolve(here, "..");
@@ -18,7 +18,7 @@ function stripVendorBanner(raw: string): string {
 
 async function assertVendorDriftClean(): Promise<void> {
   const sourcePath = path.join(linearosRepo, "src", "card", "card-intent-core.ts");
-  const vendorPath = path.join(packageRoot, "src", "vendor", "card-intent-core.ts");
+  const vendorPath = path.join(packageRoot, "src", "linearos", "vendor", "card-intent-core.ts");
   const [source, vendor] = await Promise.all([
     fs.readFile(sourcePath, "utf-8"),
     fs.readFile(vendorPath, "utf-8"),

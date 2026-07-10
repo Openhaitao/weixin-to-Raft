@@ -72,7 +72,7 @@ async function testOtherCardProtocolsAreStripped(): Promise<void> {
   });
 }
 
-async function testAwaitingMaterialBadDraftGetsSafeText(): Promise<void> {
+async function testAwaitingMaterialBadDraftGetsFallbackDraft(): Promise<void> {
   await withTempHome(async () => {
     const flow = new WechatProjectCreateFlow();
     const routed = await flow.beforeAgent({ conversationId: "c3", text: "/项目创建" });
@@ -83,13 +83,28 @@ async function testAwaitingMaterialBadDraftGetsSafeText(): Promise<void> {
       { text: "::card:: something_else\n::end::" },
     );
 
-    assert.match(response.text || "", /没有稳定生成可确认的项目草稿/);
+    assert.match(response.text || "", /已生成项目草稿/);
+    assert.match(response.text || "", /项目名称/);
     assert.doesNotMatch(response.text || "", PROTOCOL_RE);
+  });
+}
+
+async function testInlineMaterialStartsExtractionInsteadOfAskingAgain(): Promise<void> {
+  await withTempHome(async () => {
+    const flow = new WechatProjectCreateFlow();
+    const routed = await flow.beforeAgent({
+      conversationId: "c4",
+      text: "/项目创建 星海科技，创始人张三，计划融资 100 万美元",
+    });
+    assert.equal(routed.handled, false);
+    assert.match(routed.request.text, /星海科技/);
+    assert.match(routed.request.text, /请输出一个 project_draft block/);
   });
 }
 
 await testProjectDraftConvertsOutsideAwaitingMaterial();
 await testOtherCardProtocolsAreStripped();
-await testAwaitingMaterialBadDraftGetsSafeText();
+await testAwaitingMaterialBadDraftGetsFallbackDraft();
+await testInlineMaterialStartsExtractionInsteadOfAskingAgain();
 
 console.log("wechat project-create flow guard tests passed");

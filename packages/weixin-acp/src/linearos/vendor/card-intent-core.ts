@@ -1,6 +1,6 @@
 // Vendored from LinearOS src/card/card-intent-core.ts
-// source commit: 08622eaeab7c858a321e594109d0456031feabaf
-// source sha256: e07282763a6c9a4636e32fbea88a5b7b8dec15bee9d3ed1217ad7418fac86506
+// source commit: 0f4db2f53cd0d062541f3ffcc61c89dcb0a9da82
+// source sha256: 9706124f4f2b8184233a839a0e085562a51b1626e1b2dd13ac657e3313afbf8a
 // Do not edit by hand; run the drift sentinel after refreshing this file.
 // @ts-nocheck
 
@@ -126,6 +126,30 @@ export interface CardIntentValidation {
   error?: string;
 }
 
+export const PROJECT_FOLLOWUP_DRAFT_SCHEMA: ReadonlyArray<Readonly<CardIntentField>> = [
+  { name: 'projectId', label: '投资云项目 ID', kind: 'single', required: true, hidden: true },
+  { name: 'followupAppend', label: '本次跟进追加', kind: 'multiline' },
+  { name: 'meetingMemoAppend', label: '会议纪要追加', kind: 'multiline' },
+  { name: 'historyStatus', label: '历史读取状态', kind: 'single', required: true, hidden: true },
+];
+
+export interface ProjectFollowupSections {
+  meetingDate: string;
+  newFacts: string;
+  judgmentChanges: string;
+  nextSteps: string;
+}
+
+export type ProjectFollowupDraftParseError =
+  | 'marker-unclosed'
+  | 'json-invalid'
+  | 'payload-invalid';
+
+export interface ProjectFollowupDraftParseResult {
+  intent: CardIntent | null;
+  error?: ProjectFollowupDraftParseError;
+}
+
 /** Registry entry for one intentType. Unknown types fail-closed (no render). */
 interface IntentSpec {
   /** default pointer text shown in place of raw protocol. */
@@ -188,6 +212,14 @@ export function validateCardIntent(intent: CardIntent | null | undefined): CardI
   if (intent.intentType === 'project_followup_ask' || intent.intentType === 'project_followup_draft') {
     if (!intent.projectId || !String(intent.projectId).trim()) {
       return { ok: false, error: 'projectId-missing' };
+    }
+    if (intent.intentType === 'project_followup_draft') {
+      if (!String(intent.historyStatus || '').trim()) {
+        return { ok: false, error: 'historyStatus-missing' };
+      }
+      if (!String(intent.followupAppend || '').trim() && !String(intent.meetingMemoAppend || '').trim()) {
+        return { ok: false, error: 'followup-content-empty' };
+      }
     }
     return { ok: true };
   }
@@ -668,35 +700,115 @@ export function stripProjectFollowupDraftDirective(text: string): string {
     .trim();
 }
 
+function followupContractFields(payload: Record<string, unknown>): CardIntentField[] {
+  return PROJECT_FOLLOWUP_DRAFT_SCHEMA.map((field) => ({
+    ...field,
+    value: String(payload[field.name] || ''),
+  }));
+}
+
+const FOLLOWUP_SECTION_LABELS: Array<{
+  key: Exclude<keyof ProjectFollowupSections, 'meetingDate'>;
+  pattern: RegExp;
+}> = [
+  { key: 'newFacts', pattern: /^(?:\*{0,2}|【)?本次新增(?:】|\*{0,2})?\s*[:：]?\s*/ },
+  { key: 'judgmentChanges', pattern: /^(?:\*{0,2}|【)?判断变化(?:】|\*{0,2})?\s*[:：]?\s*/ },
+  { key: 'nextSteps', pattern: /^(?:\*{0,2}|【)?下一步(?:】|\*{0,2})?\s*[:：]?\s*/ },
+];
+
+/** Split the append-only follow-up text into editable semantic sections. Legacy
+ * unlabelled text is preserved: conservative keyword boundaries are used when
+ * present, otherwise the full body stays in 本次新增. */
+export function parseProjectFollowupAppend(value: string, meetingDate = ''): ProjectFollowupSections {
+  let body = String(value || '').trim();
+  let date = String(meetingDate || '').trim();
+  const dateHeader = body.match(/^(\d{4}-\d{1,2}-\d{1,2})\s*[:：]\s*(?:\n|$)/);
+  if (dateHeader) {
+    date ||= dateHeader[1];
+    body = body.slice(dateHeader[0].length).trim();
+  }
+
+  const sections: ProjectFollowupSections = {
+    meetingDate: date,
+    newFacts: '',
+    judgmentChanges: '',
+    nextSteps: '',
+  };
+  let current: Exclude<keyof ProjectFollowupSections, 'meetingDate'> | null = null;
+  let sawLabel = false;
+  for (const line of body.split('\n')) {
+    const trimmed = line.trim();
+    const label = FOLLOWUP_SECTION_LABELS.find((entry) => entry.pattern.test(trimmed));
+    if (label) {
+      sawLabel = true;
+      current = label.key;
+      const remainder = trimmed.replace(label.pattern, '').trim();
+      if (remainder) sections[current] = remainder;
+      continue;
+    }
+    if (current) sections[current] = [sections[current], line].filter(Boolean).join('\n').trim();
+  }
+  if (sawLabel) return sections;
+
+  const nextIndex = body.search(/(?:下一步|后续(?:建议|计划)|待跟进)/);
+  const beforeNext = nextIndex >= 0 ? body.slice(0, nextIndex).trim() : body;
+  sections.nextSteps = nextIndex >= 0 ? body.slice(nextIndex).trim() : '';
+  const changeIndex = beforeNext.search(/(?:相比|相较|较上次|判断(?:发生)?变化)/);
+  sections.newFacts = (changeIndex >= 0 ? beforeNext.slice(0, changeIndex) : beforeNext).trim();
+  sections.judgmentChanges = changeIndex >= 0 ? beforeNext.slice(changeIndex).trim() : '';
+  return sections;
+}
+
+/** Rebuild the one append-only field from the three editable preview sections. */
+export function composeProjectFollowupAppend(sections: ProjectFollowupSections): string {
+  const body = [
+    ['本次新增', sections.newFacts],
+    ['判断变化', sections.judgmentChanges],
+    ['下一步', sections.nextSteps],
+  ]
+    .filter(([, value]) => String(value || '').trim())
+    .map(([label, value]) => `【${label}】${String(value).trim()}`)
+    .join('\n');
+  if (!body) return '';
+  const date = String(sections.meetingDate || '').trim();
+  return date ? `${date}:\n${body}` : body;
+}
+
 /** Parse the legacy stage-2 follow-up draft marker into a CardIntent. This keeps
  * the current model marker as a temporary input syntax while centralizing
  * validation/rendering. The adapter persists this same payload before submit. */
-export function parseProjectFollowupDraftDirective(text: string): CardIntent | null {
-  if (!text || !text.includes('[[PROJECT_FOLLOWUP_DRAFT]]')) return null;
+export function parseProjectFollowupDraftDirectiveResult(text: string): ProjectFollowupDraftParseResult {
+  if (!text || !text.includes('[[PROJECT_FOLLOWUP_DRAFT]]')) return { intent: null };
   const m = text.match(/\[\[PROJECT_FOLLOWUP_DRAFT\]\]([\s\S]*?)\[\[\/PROJECT_FOLLOWUP_DRAFT\]\]/);
-  if (!m) return null;
+  if (!m) return { intent: null, error: 'marker-unclosed' };
   const json = m[1].trim().replace(/^```(?:json)?\s*/i, '').replace(/```$/, '').trim();
   try {
     const p = JSON.parse(json);
-    if (!p || !p.projectId) return null;
+    if (!p || typeof p !== 'object' || !p.projectId) return { intent: null, error: 'payload-invalid' };
     const historyStatus = String(p.historyStatus || '');
-    return {
+    const intent: CardIntent = {
       intentType: 'project_followup_draft',
       projectId: String(p.projectId),
       projectName: String(p.projectName || ''),
       meetingDate: String(p.meetingDate || ''),
-      meetingUrl: String(p.meetingUrl || ''),
+      meetingRef: String(p.meetingRef || p.meetingUrl || ''),
+      meetingUrl: String(p.meetingUrl || p.meetingRef || ''),
       meetingMemoAppend: String(p.meetingMemoAppend || ''),
       followupAppend: String(p.followupAppend || ''),
       evidence: Array.isArray(p.evidence) ? p.evidence.map(String).filter(Boolean) : [],
       historyStatus,
       historyEmpty: p.historyEmpty === true || /未读取到|无历史|均为空|没有历史/.test(historyStatus),
-      fields: [],
+      fields: followupContractFields(p),
       preamble: text.slice(0, m.index).trim(),
     };
+    return { intent };
   } catch {
-    return null;
+    return { intent: null, error: 'json-invalid' };
   }
+}
+
+export function parseProjectFollowupDraftDirective(text: string): CardIntent | null {
+  return parseProjectFollowupDraftDirectiveResult(text).intent;
 }
 
 export function stripHoutouDraftDirective(text: string): string {

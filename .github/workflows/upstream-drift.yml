@@ -1,0 +1,26 @@
+name: Upstream drift alert
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 2 * * *"
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check wong2/main drift
+        shell: bash
+        run: |
+          git remote add upstream https://github.com/wong2/weixin-agent-sdk.git
+          git fetch --no-tags upstream main
+          behind="$(git rev-list --count HEAD..upstream/main)"
+          ahead="$(git rev-list --count upstream/main..HEAD)"
+          echo "fork ahead=${ahead} behind=${behind}"
+          if [[ "${behind}" != "0" ]]; then
+            echo "::error::Openhaitao fork is ${behind} commit(s) behind wong2/main; review and port deliberately."
+            exit 1
+          fi
