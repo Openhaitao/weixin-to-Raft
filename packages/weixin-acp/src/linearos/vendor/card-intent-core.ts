@@ -1,6 +1,6 @@
 // Vendored from LinearOS src/card/card-intent-core.ts
-// source commit: 0f4db2f53cd0d062541f3ffcc61c89dcb0a9da82
-// source sha256: 9706124f4f2b8184233a839a0e085562a51b1626e1b2dd13ac657e3313afbf8a
+// source commit: 26b13d79947b6b402c83a64410ef5eb69f7a85ed
+// source sha256: e5123ce53ba4913e91e3fffb8e2cf81b8b0094b0b8bcd4e8c966260f0cc95f75
 // Do not edit by hand; run the drift sentinel after refreshing this file.
 // @ts-nocheck
 
@@ -58,7 +58,37 @@ export interface CardIntentField {
   kind?: DraftKind;
   required?: boolean;
   hidden?: boolean;
+  placeholder?: string;
   options?: Array<{ text: string; value: string }>;
+}
+
+export interface HoutouPackageOverview {
+  event?: string;
+  equityStatus?: string;
+  cashflowStatus?: string;
+  participation?: {
+    companyHasNewRound?: boolean | string;
+    linearHasTransaction?: boolean | string;
+    branch?: string;
+    summary?: string;
+  };
+  participationBranch?: string;
+}
+
+export interface HoutouPendingConfirm {
+  field?: string;
+  note?: string;
+}
+
+export interface HoutouCashflowDraft {
+  status?: string;
+  fund?: string;
+  category?: string;
+  amount?: string;
+  currency?: string;
+  date?: string;
+  note?: string;
+  missing?: string[];
 }
 
 export interface BpPickCandidate {
@@ -84,9 +114,9 @@ export interface CardIntent {
   historyStatus?: string;
   historyEmpty?: boolean;
   selfCheck?: string;
-  packageOverview?: Record<string, unknown>;
-  pendingConfirm?: unknown[];
-  cashflowDraft?: Record<string, unknown> | null;
+  packageOverview?: HoutouPackageOverview;
+  pendingConfirm?: HoutouPendingConfirm[];
+  cashflowDraft?: HoutouCashflowDraft | null;
   payload?: Record<string, unknown>;
   minuteLink?: string;
   resumePrompt?: string;
@@ -944,7 +974,7 @@ export function parseBpPickDirective(text: string): CardIntent | null {
       leaderName: c && c.leaderName != null ? String(c.leaderName) : '',
       lastUpdate: c && c.lastUpdate != null ? String(c.lastUpdate) : '',
       evidence: c && c.evidence != null ? String(c.evidence) : '',
-    })).filter((c) => c.projectId);
+    })).filter((c: BpPickCandidate) => c.projectId);
     const autoPick = p && !Array.isArray(p) && p.autoPick != null && String(p.autoPick).trim()
       ? String(p.autoPick).trim()
       : '';
@@ -985,8 +1015,9 @@ export function parseRadarDigestDirective(text: string): CardIntent | null {
   const candidates = obj.candidates
     .filter((c: unknown): c is Record<string, unknown> => {
       if (!c || typeof c !== 'object') return false;
-      const source = c.source && typeof c.source === 'object' ? c.source as Record<string, unknown> : null;
-      return nonEmpty(c.candidateName) && !!source && nonEmpty(source.minuteToken);
+      const candidate = c as Record<string, unknown>;
+      const source = candidate.source && typeof candidate.source === 'object' ? candidate.source as Record<string, unknown> : null;
+      return nonEmpty(candidate.candidateName) && !!source && nonEmpty(source.minuteToken);
     })
     .map((c): CardIntent => {
       const source = c.source as Record<string, unknown>;
