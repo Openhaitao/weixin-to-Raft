@@ -36,7 +36,10 @@
     "prepublishOnly": "pnpm run build",
     "login": "tsx main.ts login",
     "start": "tsx main.ts start",
-    "typecheck": "tsc --noEmit"
+    "test:project-flow": "tsx src/linearos/project-create-flow.test.ts",
+    "typecheck": "tsc --noEmit",
+    "test:contract": "tsx scripts/verify-card-contract.ts",
+    "test:linearos": "tsx scripts/verify-linearos-convergence.ts"
   },
   "devDependencies": {
     "@types/cross-spawn": "^6.0.6",

@@ -13,6 +13,8 @@
  *   npx weixin-acp start -- node ./my-agent.js
  */
 
+import fs from "node:fs";
+
 import { isLoggedIn, login, logout, start } from "weixin-agent-sdk";
 
 import { AcpAgent } from "./src/acp-agent.js";
@@ -25,6 +27,35 @@ const BUILTIN_AGENTS: Record<string, { command: string }> = {
 
 const command = process.argv[2];
 
+type CliOptions = {
+  cwd?: string;
+  systemPromptFile?: string;
+};
+
+function parseCliOptions(args: string[]): CliOptions {
+  let cwd: string | undefined;
+  let systemPromptFile: string | undefined;
+
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === "--cwd") {
+      cwd = args[++i];
+      continue;
+    }
+    if (arg === "--system-prompt-file") {
+      systemPromptFile = args[++i];
+      continue;
+    }
+  }
+
+  return { cwd, systemPromptFile };
+}
+
+function readSystemPrompt(filePath?: string): string | undefined {
+  if (!filePath) return undefined;
+  return fs.readFileSync(filePath, "utf-8");
+}
+
 async function ensureLoggedIn() {
   if (!isLoggedIn()) {
     console.log("未检测到登录信息，请先扫码登录微信\n");
@@ -32,10 +63,15 @@ async function ensureLoggedIn() {
   }
 }
 
-async function startAgent(acpCommand: string, acpArgs: string[] = []) {
+async function startAgent(acpCommand: string, acpArgs: string[] = [], opts: CliOptions = {}) {
   await ensureLoggedIn();
 
-  const agent = new AcpAgent({ command: acpCommand, args: acpArgs });
+  const agent = new AcpAgent({
+    command: acpCommand,
+    args: acpArgs,
+    cwd: opts.cwd,
+    systemPrompt: readSystemPrompt(opts.systemPromptFile),
+  });
 
   const ac = new AbortController();
   process.on("SIGINT", () => {
@@ -53,7 +89,15 @@ async function startAgent(acpCommand: string, acpArgs: string[] = []) {
 
 async function main() {
   if (command === "login") {
-    await login();
+    const json = process.argv.includes("--json");
+    const accountId = await login({
+      printQr: !json,
+      log: json ? (message) => console.error(message) : console.log,
+      onQr: json
+        ? (result) => console.log(`WEIXIN_LOGIN_QR ${JSON.stringify(result)}`)
+        : undefined,
+    });
+    if (json) console.log(`WEIXIN_LOGIN_DONE ${JSON.stringify({ accountId })}`);
     return;
   }
 
@@ -70,15 +114,17 @@ async function main() {
       process.exit(1);
     }
 
+    const opts = parseCliOptions(process.argv.slice(3, ddIndex));
     const [acpCommand, ...acpArgs] = process.argv.slice(ddIndex + 1);
-    const bot = await startAgent(acpCommand, acpArgs);
+    const bot = await startAgent(acpCommand, acpArgs, opts);
     await bot.wait();
     return;
   }
 
   if (command && command in BUILTIN_AGENTS) {
+    const opts = parseCliOptions(process.argv.slice(3));
     const { command: acpCommand } = BUILTIN_AGENTS[command];
-    const bot = await startAgent(acpCommand);
+    const bot = await startAgent(acpCommand, [], opts);
     await bot.wait();
     return;
   }
@@ -87,12 +133,18 @@ async function main() {
 
 用法:
   npx weixin-acp login                          扫码登录微信
+  npx weixin-acp login --json                   输出结构化二维码事件并等待扫码
   npx weixin-acp logout                         退出登录
   npx weixin-acp claude-code                     使用 Claude Code
   npx weixin-acp codex                           使用 Codex
   npx weixin-acp start -- <command> [args...]    使用自定义 agent
 
+选项:
+  --cwd <dir>                                    ACP session 工作目录
+  --system-prompt-file <file>                    新会话注入的系统提示词
+
 示例:
+  npx weixin-acp claude-code --system-prompt-file ./CLAUDE.md
   npx weixin-acp start -- node ./my-agent.js`);
 }
 

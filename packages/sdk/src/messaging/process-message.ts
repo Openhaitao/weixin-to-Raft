@@ -19,6 +19,14 @@ import { markdownToPlainText, sendMessageWeixin } from "./send.js";
 import { handleSlashCommand } from "./slash-commands.js";
 
 const MEDIA_TEMP_DIR = path.join(os.tmpdir(), "weixin-agent/media");
+const firstMessageLoggedByAccount = new Set<string>();
+
+export function buildMediaSendFallbackText(responseText?: string): string {
+  return [
+    responseText ? markdownToPlainText(responseText) : "",
+    "（附件/二维码发送失败，请稍后重试或在飞书里完成对应授权。）",
+  ].filter(Boolean).join("\n");
+}
 
 /** Save a buffer to a temporary file, returning the file path. */
 async function saveMediaBuffer(
@@ -110,6 +118,14 @@ export async function processOneMessage(
   deps: ProcessMessageDeps,
 ): Promise<void> {
   const receivedAt = Date.now();
+  if (!firstMessageLoggedByAccount.has(deps.accountId)) {
+    firstMessageLoggedByAccount.add(deps.accountId);
+    const sidecarReadyAt = Number(process.env.WEIXIN_AGENT_SIDECAR_READY_AT);
+    if (Number.isFinite(sidecarReadyAt) && sidecarReadyAt > 0) {
+      deps.log(`[timing] sidecar_ready_to_first_wechat_message_ms=${receivedAt - sidecarReadyAt}`);
+    }
+    deps.log(`[timing] first_wechat_message_received_at_ms=${receivedAt}`);
+  }
   const textBody = extractTextBody(full.item_list);
 
   // --- Slash commands ---
@@ -160,6 +176,7 @@ export async function processOneMessage(
           type: "file",
           filePath: downloaded.decryptedFilePath,
           mimeType: downloaded.fileMediaType ?? "application/octet-stream",
+          fileName: mediaItem.file_item?.file_name ?? undefined,
         };
       } else if (downloaded.decryptedVoicePath) {
         media = {
@@ -177,6 +194,7 @@ export async function processOneMessage(
   const request: ChatRequest = {
     conversationId: full.from_user_id ?? "",
     text: bodyFromItemList(full.item_list),
+    timing: { receivedAt },
     media,
   };
 
@@ -195,7 +213,10 @@ export async function processOneMessage(
       },
     }).catch(() => {});
   };
-  if (deps.typingTicket) {
+  const showTyping = deps.agent.shouldShowTyping
+    ? await deps.agent.shouldShowTyping(request)
+    : true;
+  if (deps.typingTicket && showTyping) {
     startTyping();
     typingTimer = setInterval(startTyping, 10_000);
   }
@@ -215,13 +236,23 @@ export async function processOneMessage(
       } else {
         filePath = path.isAbsolute(mediaUrl) ? mediaUrl : path.resolve(mediaUrl);
       }
-      await sendWeixinMediaFile({
-        filePath,
-        to,
-        text: response.text ? markdownToPlainText(response.text) : "",
-        opts: { baseUrl: deps.baseUrl, token: deps.token, contextToken },
-        cdnBaseUrl: deps.cdnBaseUrl,
-      });
+      try {
+        await sendWeixinMediaFile({
+          filePath,
+          to,
+          text: response.text ? markdownToPlainText(response.text) : "",
+          opts: { baseUrl: deps.baseUrl, token: deps.token, contextToken },
+          cdnBaseUrl: deps.cdnBaseUrl,
+        });
+      } catch (err) {
+        logger.error(`processOneMessage: media send failed, falling back to text: ${err instanceof Error ? err.stack ?? err.message : JSON.stringify(err)}`);
+        const fallbackText = buildMediaSendFallbackText(response.text);
+        await sendMessageWeixin({
+          to,
+          text: fallbackText,
+          opts: { baseUrl: deps.baseUrl, token: deps.token, contextToken },
+        });
+      }
     } else if (response.text) {
       await sendMessageWeixin({
         to,

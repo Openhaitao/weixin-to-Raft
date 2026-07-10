@@ -7,6 +7,8 @@ export type AcpAgentOptions = {
   env?: Record<string, string>;
   /** Working directory for the subprocess and ACP sessions */
   cwd?: string;
+  /** System instructions inserted at the beginning of each new conversation. */
+  systemPrompt?: string;
   /** Prompt timeout in milliseconds (default: 120_000) */
   promptTimeoutMs?: number;
 };
