@@ -5,6 +5,7 @@ import type { AcpAgentOptions } from "./types.js";
 import { AcpConnection } from "./acp-connection.js";
 import { convertRequestToContentBlocks } from "./content-converter.js";
 import { WechatProjectCreateFlow } from "./linearos/project-create-flow.js";
+import { WechatProjectFollowupFlow } from "./linearos/project-followup-flow.js";
 import { ResponseCollector } from "./response-collector.js";
 import { isBareMaterialRequest, isMaterialInboxCancelText, MaterialInbox } from "./linearos/material-inbox.js";
 
@@ -26,6 +27,7 @@ export class AcpAgent implements Agent {
   private sessions = new Map<string, SessionId>();
   private systemPromptSent = new Set<string>();
   private projectCreateFlow = new WechatProjectCreateFlow();
+  private projectFollowupFlow = new WechatProjectFollowupFlow();
   private materialInbox = new MaterialInbox();
   private options: AcpAgentOptions;
 
@@ -40,12 +42,22 @@ export class AcpAgent implements Agent {
 
   async shouldShowTyping(request: ChatRequest): Promise<boolean> {
     if (isBareMaterialRequest(request)) {
-      return this.projectCreateFlow.isAwaitingMaterial(request.conversationId);
+      return (await this.projectCreateFlow.isAwaitingMaterial(request.conversationId))
+        || (await this.projectFollowupFlow.isAwaitingMaterial(request.conversationId));
     }
     return true;
   }
 
   async chat(request: ChatRequest): Promise<ChatResponse> {
+    // Followup routes first: its command/state must win over the create flow's
+    // awaiting_material state (which would otherwise swallow /项目跟进 as material).
+    // The inbox is passed so a bare-material-then-command sequence sees its material.
+    const followupRouted = await this.projectFollowupFlow.beforeAgent(request, { materialInbox: this.materialInbox });
+    if (followupRouted.handled) {
+      return await this.runFollowupModelTurns(request, followupRouted.response);
+    }
+    request = followupRouted.request;
+
     const routed = await this.projectCreateFlow.beforeAgent(request);
     if (routed.handled) {
       return routed.response;
@@ -129,9 +141,47 @@ export class AcpAgent implements Agent {
     log(`[timing] acp_prompt_to_first_token_ms=${firstContentAt === null ? "n/a" : firstContentAt - promptStart}`);
     log(`[timing] acp_prompt_to_final_reply_ms=${promptDoneAt - promptStart}`);
 
-    const response = await this.projectCreateFlow.afterAgent(request, await collector.toResponse());
+    let response = await this.projectFollowupFlow.afterAgent(request, await collector.toResponse());
+    response = await this.runFollowupModelTurns(request, response);
+    response = await this.projectCreateFlow.afterAgent(request, response);
     log(`response: ${response.text?.slice(0, 80) ?? "[no text]"}${response.media ? " +media" : ""}`);
     return response;
+  }
+
+  /** Drive the followup flow's deterministic model turns: stage-2 analysis after a
+   * handled beforeAgent (progress receipt already composed) and the flow's single
+   * silent self-heal retry. Bounded to 2 turns; the flow's own retryCount guard
+   * keeps this from looping regardless. */
+  private async runFollowupModelTurns(request: ChatRequest, initial: ChatResponse): Promise<ChatResponse> {
+    let prompt = this.projectFollowupFlow.takePendingModelPrompt(request.conversationId);
+    if (!prompt) return initial;
+
+    const conn = await this.connection.ensureReady();
+    const sessionId = await this.getOrCreateSession(request.conversationId, conn);
+    let final: ChatResponse = {};
+    let turns = 0;
+    while (prompt && turns < 2) {
+      turns += 1;
+      const collector = new ResponseCollector();
+      this.connection.registerCollector(sessionId, collector);
+      try {
+        await conn.prompt({ sessionId, prompt: [{ type: "text", text: prompt }] });
+      } catch (err) {
+        this.connection.unregisterCollector(sessionId);
+        this.sessions.delete(request.conversationId);
+        this.systemPromptSent.delete(request.conversationId);
+        log(`followup model turn failed: ${err instanceof Error ? err.message : String(err)}`);
+        return {
+          ...initial,
+          text: [initial.text, "生成跟进草稿的模型调用失败了，本次未写库。请重新发送 /项目跟进 + 材料。"].filter(Boolean).join("\n\n"),
+        };
+      }
+      this.connection.unregisterCollector(sessionId);
+      final = await this.projectFollowupFlow.afterAgent(request, await collector.toResponse());
+      prompt = this.projectFollowupFlow.takePendingModelPrompt(request.conversationId);
+    }
+    const text = [initial.text, final.text].filter(Boolean).join("\n\n");
+    return { ...final, text };
   }
 
   private async getOrCreateSession(
@@ -170,6 +220,7 @@ export class AcpAgent implements Agent {
     this.systemPromptSent.delete(conversationId);
     this.materialInbox.clear(conversationId);
     void this.projectCreateFlow.reset(conversationId);
+    void this.projectFollowupFlow.reset(conversationId);
   }
 
   /**

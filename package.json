@@ -2,6 +2,6 @@
   "private": true,
   "scripts": {
     "typecheck": "pnpm --filter weixin-agent-sdk build && pnpm -r run typecheck",
-    "test:linearos": "pnpm --filter weixin-acp test:project-flow && pnpm --filter weixin-acp test:contract && pnpm --filter weixin-acp test:linearos"
+    "test:linearos": "pnpm --filter weixin-acp test:project-flow && pnpm --filter weixin-acp test:followup-flow && pnpm --filter weixin-acp test:contract && pnpm --filter weixin-acp test:linearos"
   }
 }

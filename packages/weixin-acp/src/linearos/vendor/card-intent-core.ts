@@ -1,6 +1,6 @@
 // Vendored from LinearOS src/card/card-intent-core.ts
-// source commit: 26b13d79947b6b402c83a64410ef5eb69f7a85ed
-// source sha256: e5123ce53ba4913e91e3fffb8e2cf81b8b0094b0b8bcd4e8c966260f0cc95f75
+// source commit: 67fdd1ce1f63069735eb687a522b6704717d865c
+// source sha256: 58ad3d53cf4ded0fcfb09c4e6b136cc9afe69a3f2cdf688476d04b31b30ae3c5
 // Do not edit by hand; run the drift sentinel after refreshing this file.
 // @ts-nocheck
 
@@ -100,6 +100,11 @@ export interface BpPickCandidate {
   evidence: string;
 }
 
+export interface FollowupProjectCandidate {
+  id: string;
+  name: string;
+}
+
 /** The canonical card request. Every input front-end normalizes to this. */
 export interface CardIntent {
   intentType: string;
@@ -113,12 +118,15 @@ export interface CardIntent {
   followupAppend?: string;
   historyStatus?: string;
   historyEmpty?: boolean;
+  projectCandidates?: FollowupProjectCandidate[];
   selfCheck?: string;
   packageOverview?: HoutouPackageOverview;
   pendingConfirm?: HoutouPendingConfirm[];
   cashflowDraft?: HoutouCashflowDraft | null;
   payload?: Record<string, unknown>;
   minuteLink?: string;
+  minutesFailureType?: 'missing_scope' | 'resource_acl';
+  fallbackDocLink?: string;
   resumePrompt?: string;
   autoPick?: string;
   bpCandidates?: BpPickCandidate[];
@@ -262,6 +270,9 @@ export function validateCardIntent(intent: CardIntent | null | undefined): CardI
   if (intent.intentType === 'minutes_auth_needed') {
     if (!intent.minuteLink || !String(intent.minuteLink).trim()) {
       return { ok: false, error: 'minuteLink-missing' };
+    }
+    if (intent.minutesFailureType !== 'missing_scope' && intent.minutesFailureType !== 'resource_acl') {
+      return { ok: false, error: 'minutes-failure-type-invalid' };
     }
     return { ok: true };
   }
@@ -892,10 +903,18 @@ export function parseMinutesAuthDirective(text: string): CardIntent | null {
   try {
     const p = JSON.parse(json);
     const minuteLink = String(p.minuteLink || p.minuteUrl || '');
+    // Backward compatibility for the deployed project-create Skill, whose
+    // canonical source is not yet versioned in this repository. The adapter
+    // still checks the live scope gate before any OAuth action, so an untyped
+    // resource ACL failure with valid scopes cannot trigger reauthorization.
+    const minutesFailureType = String(p.failureType || 'missing_scope');
     if (!minuteLink.trim()) return null;
+    if (minutesFailureType !== 'missing_scope' && minutesFailureType !== 'resource_acl') return null;
     return {
       intentType: 'minutes_auth_needed',
       minuteLink,
+      minutesFailureType,
+      fallbackDocLink: String(p.fallbackDocLink || ''),
       projectName: String(p.projectName || ''),
       projectId: p.projectId ? String(p.projectId) : '',
       resumePrompt: String(p.resumePrompt || ''),
