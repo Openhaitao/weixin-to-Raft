@@ -25,6 +25,7 @@ import {
 } from "./vendor/followup-stage1.js";
 import {
   buildAttachmentMaterial,
+  normalizeMemoEntry,
   pollTouziyunTextAuth,
   readJsonFile,
   resolveFeishuIdentity,
@@ -621,7 +622,8 @@ export class WechatProjectFollowupFlow {
     }
 
     const followupText = composeProjectFollowupAppend(state.sections);
-    const memoText = String(state.meetingMemoAppend || "").trim();
+    // Same canonical entry format as the create path: date-prefixed, full-width colon.
+    const memoText = normalizeMemoEntry(state.meetingMemoAppend, state.sections.meetingDate);
     if (!followupText.trim() && !memoText) {
       return { text: "没有可写入内容——跟进结论和会议纪要链接都是空的，请 `修改` 补充后再 `确认提交`。" };
     }

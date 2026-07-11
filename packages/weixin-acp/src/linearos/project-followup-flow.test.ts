@@ -286,6 +286,28 @@ async function testMaterialFirstThenCommandConsumesInbox(): Promise<void> {
   await flow.reset(conversationId);
 }
 
+async function testMemoEntryFormatMatchesFeishuScript(): Promise<void> {
+  const { normalizeMemoEntry } = await import("./touziyun-shared.ts");
+  const today = new Date().toISOString().slice(0, 10);
+  assert.equal(normalizeMemoEntry(MINUTE_LINK), `${today}：${MINUTE_LINK}`, "bare link gets today prefix");
+  assert.equal(
+    normalizeMemoEntry(MINUTE_LINK, "2026-07-10"),
+    `2026-07-10：${MINUTE_LINK}`,
+    "meeting date from material wins over today",
+  );
+  assert.equal(
+    normalizeMemoEntry(`2026-07-09: ${MINUTE_LINK}`),
+    `2026-07-09：${MINUTE_LINK}`,
+    "half-width colon unifies to full-width",
+  );
+  assert.equal(
+    normalizeMemoEntry(`2026-07-09：${MINUTE_LINK}`, "2026-07-10"),
+    `2026-07-09：${MINUTE_LINK}`,
+    "existing date is preserved, not overwritten",
+  );
+  assert.equal(normalizeMemoEntry(""), "", "empty stays empty");
+}
+
 async function testKeywordPriorityExplicitBeatsMaterialTitle(): Promise<void> {
   const keyword = __wechatProjectFollowupTest.deriveKeyword({
     text: "/项目跟进 星海科技",
@@ -310,6 +332,7 @@ async function main(): Promise<void> {
   await testSwitchSupersedesOldDraftFailClosed();
   await testEmptyContentBlocksSubmit();
   await testMaterialFirstThenCommandConsumesInbox();
+  await testMemoEntryFormatMatchesFeishuScript();
   await testKeywordPriorityExplicitBeatsMaterialTitle();
   await fs.rm(tmpHome, { recursive: true, force: true });
   console.log("wechat project-followup flow tests passed");

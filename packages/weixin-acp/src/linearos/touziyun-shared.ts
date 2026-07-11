@@ -312,6 +312,22 @@ export async function pollTouziyunTextAuth(): Promise<{ ok: boolean; response?: 
   };
 }
 
+/** Canonical 会议纪要(AI) entry format, matching what touziyun-bp.mjs follow writes
+ * (`YYYY-MM-DD：<链接>`, full-width colon). A non-empty entry without a leading date
+ * gets `fallbackDate` prefixed; a half-width/space separator after an existing date
+ * is unified to the full-width colon. */
+export function normalizeMemoEntry(value: string, fallbackDate?: string): string {
+  const clean = String(value || "").trim();
+  if (!clean) return "";
+  if (/^\d{4}-\d{1,2}-\d{1,2}$/.test(clean)) return clean;
+  const dated = clean.match(/^(\d{4}-\d{1,2}-\d{1,2})\s*[：:]?\s*(\S[\s\S]*)$/);
+  if (dated) return `${dated[1]}：${dated[2].trim()}`;
+  const date = fallbackDate && /^\d{4}-\d{1,2}-\d{1,2}$/.test(fallbackDate)
+    ? fallbackDate
+    : new Date().toISOString().slice(0, 10);
+  return `${date}：${clean}`;
+}
+
 export async function buildAttachmentMaterial(request: ChatRequest): Promise<string> {
   const media = request.media;
   if (!media) return "";
