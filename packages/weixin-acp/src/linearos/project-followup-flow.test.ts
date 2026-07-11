@@ -228,7 +228,6 @@ async function testSwitchSupersedesOldDraftFailClosed(): Promise<void> {
     historyEmpty: true,
     history: { status: "x", historyEmpty: true, meetingMemo: "", followup: "" },
     materialText: "",
-    supersededFollowupIds: [],
     updatedAt: Date.now(),
   };
   persisted.states[conversationId] = staleDraft;
@@ -261,6 +260,32 @@ async function testEmptyContentBlocksSubmit(): Promise<void> {
   await flow.reset(conversationId);
 }
 
+async function testMaterialFirstThenCommandConsumesInbox(): Promise<void> {
+  const { MaterialInbox } = await import("./material-inbox.ts");
+  const inbox = new MaterialInbox();
+  const conversationId = "wx-conv-inbox";
+  inbox.stash(req(MINUTE_LINK, conversationId));
+
+  const flow = new WechatProjectFollowupFlow();
+  setSearchFixture({ ok: true, keyword: "星海科技", matches: [{ id: "p-100", name: "星海科技" }], autoPick: "p-100" });
+  setGetFixture({ ok: true, project: "p-100", projectName: "星海科技", meetingMemo: "", followup: "" });
+
+  const routed = await flow.beforeAgent(req("/项目跟进 星海科技", conversationId), { materialInbox: inbox });
+  assert.ok(routed.handled);
+  assert.match(
+    routed.handled ? routed.response.text || "" : "",
+    /已锁定投资云项目「星海科技」/,
+    "stashed bare material must count as this command's material (no re-send ask)",
+  );
+  assert.equal(inbox.has(conversationId), false, "inbox material must be consumed by the merge");
+  assert.equal(await flow.isAwaitingMaterial(conversationId), false);
+
+  const prompt = flow.takePendingModelPrompt(conversationId);
+  assert.ok(prompt, "stage-2 must start directly");
+  assert.match(prompt!, /Material Inbox|minutes\/obcn_test_minute/, "stage-2 material must contain the stashed link");
+  await flow.reset(conversationId);
+}
+
 async function testKeywordPriorityExplicitBeatsMaterialTitle(): Promise<void> {
   const keyword = __wechatProjectFollowupTest.deriveKeyword({
     text: "/项目跟进 星海科技",
@@ -284,6 +309,7 @@ async function main(): Promise<void> {
   await testConfirmSubmitsAndReportsWrittenFields();
   await testSwitchSupersedesOldDraftFailClosed();
   await testEmptyContentBlocksSubmit();
+  await testMaterialFirstThenCommandConsumesInbox();
   await testKeywordPriorityExplicitBeatsMaterialTitle();
   await fs.rm(tmpHome, { recursive: true, force: true });
   console.log("wechat project-followup flow tests passed");

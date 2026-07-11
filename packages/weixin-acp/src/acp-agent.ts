@@ -51,7 +51,8 @@ export class AcpAgent implements Agent {
   async chat(request: ChatRequest): Promise<ChatResponse> {
     // Followup routes first: its command/state must win over the create flow's
     // awaiting_material state (which would otherwise swallow /项目跟进 as material).
-    const followupRouted = await this.projectFollowupFlow.beforeAgent(request);
+    // The inbox is passed so a bare-material-then-command sequence sees its material.
+    const followupRouted = await this.projectFollowupFlow.beforeAgent(request, { materialInbox: this.materialInbox });
     if (followupRouted.handled) {
       return await this.runFollowupModelTurns(request, followupRouted.response);
     }

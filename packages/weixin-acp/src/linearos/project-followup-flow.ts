@@ -41,6 +41,18 @@ type FlowRoute =
   | { handled: true; response: ChatResponse }
   | { handled: false; request: ChatRequest };
 
+/** The slice of MaterialInbox the flow needs: material stashed BEFORE the command
+ * (bare link/file, silently cached) must be visible to /项目跟进, mirroring the
+ * Feishu adapter's merge-before-intent ordering. */
+type MaterialInboxLike = {
+  has(conversationId: string): boolean;
+  mergeInto(request: ChatRequest): ChatRequest;
+};
+
+type BeforeAgentOptions = {
+  materialInbox?: MaterialInboxLike;
+};
+
 type Candidate = FollowupStage1Project;
 
 type SubmissionRecord = { status: "inflight" | "completed"; savedAt: number };
@@ -77,7 +89,6 @@ type FlowState =
       historyEmpty: boolean;
       history: FollowupHistoryFact;
       materialText: string;
-      supersededFollowupIds: string[];
       authStartedAt?: number;
       updatedAt: number;
     };
@@ -269,14 +280,18 @@ export class WechatProjectFollowupFlow {
   private readonly stateFile = resolveWechatStateFile("project-followup-text-flow.json");
   private loaded = false;
 
-  async beforeAgent(request: ChatRequest): Promise<FlowRoute> {
+  async beforeAgent(request: ChatRequest, options: BeforeAgentOptions = {}): Promise<FlowRoute> {
     await this.load();
     this.prune();
     const text = request.text.trim();
     const existing = this.states.get(request.conversationId);
 
     if (isFollowupCommand(text)) {
-      if (!hasConcreteMaterial(request) && !followupCommandTail(text)) {
+      // Material-first sequence: bare material stashed by the inbox before the
+      // command counts as this command's material (keyword still derives from the
+      // original command text, not the merged block).
+      const merged = this.mergeInboxMaterial(request, options);
+      if (!hasConcreteMaterial(merged) && !followupCommandTail(text)) {
         this.states.set(request.conversationId, { phase: "awaiting_material", hint: "", updatedAt: Date.now() });
         await this.save();
         return {
@@ -284,7 +299,7 @@ export class WechatProjectFollowupFlow {
           response: { text: "收到，开始项目跟进。把这次的会议纪要链接、文档或材料发我（可以带项目名，如 `/项目跟进 星海科技 + 链接`）。" },
         };
       }
-      return { handled: true, response: await this.startStage1(request, text) };
+      return { handled: true, response: await this.startStage1(merged, text) };
     }
 
     if (!existing) return { handled: false, request };
@@ -295,10 +310,11 @@ export class WechatProjectFollowupFlow {
         await this.save();
         return { handled: true, response: { text: "已取消这次项目跟进。" } };
       }
-      if (!hasConcreteMaterial(request) && !text) {
+      const merged = this.mergeInboxMaterial(request, options);
+      if (!hasConcreteMaterial(merged) && !text) {
         return { handled: true, response: { text: "把这次的会议纪要链接、文档或材料发我就行。" } };
       }
-      return { handled: true, response: await this.startStage1(request, text) };
+      return { handled: true, response: await this.startStage1(merged, text) };
     }
 
     if (existing.phase === "choosing") {
@@ -332,6 +348,12 @@ export class WechatProjectFollowupFlow {
 
     // draft phase
     return { handled: true, response: await this.handleDraftReply(request, existing) };
+  }
+
+  private mergeInboxMaterial(request: ChatRequest, options: BeforeAgentOptions): ChatRequest {
+    if (hasConcreteMaterial(request)) return request;
+    if (!options.materialInbox?.has(request.conversationId)) return request;
+    return options.materialInbox.mergeInto(request);
   }
 
   async isAwaitingMaterial(conversationId: string): Promise<boolean> {
@@ -401,7 +423,6 @@ export class WechatProjectFollowupFlow {
       historyEmpty: state.history.historyEmpty,
       history: state.history,
       materialText: state.materialText,
-      supersededFollowupIds: [],
       updatedAt: Date.now(),
     };
     this.states.set(request.conversationId, draft);
@@ -587,11 +608,9 @@ export class WechatProjectFollowupFlow {
     conversationId: string,
     state: Extract<FlowState, { phase: "draft" }>,
   ): Promise<ChatResponse> {
-    // superseded fail-closed: a switched-away draft must never submit, even if a
-    // stale state entry reaches here.
-    if (state.supersededFollowupIds.includes(state.followupId)) {
-      return { text: "这份跟进草稿已因切换项目作废，请使用最新草稿提交。" };
-    }
+    // superseded fail-closed: switchProject records the old followupId as completed
+    // in the submissions map, so a switched-away draft can never submit — even one
+    // resurrected from a stale state file.
     const prior = this.submissions.get(state.followupId);
     if (prior && Date.now() - prior.savedAt < SUBMISSION_TTL_MS) {
       return {
