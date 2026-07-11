@@ -91,7 +91,7 @@ function stateRegistryPath(): string {
   return path.join(os.homedir(), ".linearos", "shared", "state-registry.json");
 }
 
-async function resolveAppId(): Promise<string> {
+export async function resolveAppId(): Promise<string> {
   const home = process.env.WEIXIN_AGENT_HOME || process.env.CTI_HOME || process.env.LOS_HOME || "";
   const config = home ? await readEnvFile(path.join(home, "config.env")) : {};
   return process.env.CTI_FEISHU_APP_ID || config.CTI_FEISHU_APP_ID || "";
@@ -310,6 +310,86 @@ export async function pollTouziyunTextAuth(): Promise<{ ok: boolean; response?: 
     ok: false,
     response: { text: `投资云授权检查失败，未写库。原因：${reason}` },
   };
+}
+
+const FEISHU_TITLE_TIMEOUT_MS = 10_000;
+
+type FeishuLinkRef =
+  | { kind: "minutes"; token: string }
+  | { kind: "docx"; token: string }
+  | { kind: "wiki"; token: string };
+
+function firstFeishuLinkRef(text: string): FeishuLinkRef | null {
+  const s = String(text || "");
+  const minutes = s.match(/\/minutes\/([A-Za-z0-9]{10,})/);
+  if (minutes) return { kind: "minutes", token: minutes[1] };
+  const docx = s.match(/\/(?:docx|docs|doc)\/([A-Za-z0-9]{10,})/);
+  if (docx) return { kind: "docx", token: docx[1] };
+  const wiki = s.match(/\/wiki\/([A-Za-z0-9]{10,})/);
+  if (wiki) return { kind: "wiki", token: wiki[1] };
+  return null;
+}
+
+function runLarkCliJson(args: string[]): Promise<Record<string, unknown> | null> {
+  return new Promise((resolve) => {
+    execFile("lark-cli", args, {
+      encoding: "utf-8",
+      timeout: FEISHU_TITLE_TIMEOUT_MS,
+      maxBuffer: 2 * 1024 * 1024,
+    }, (_err, stdout) => {
+      const raw = String(stdout || "");
+      const start = raw.indexOf("{");
+      const end = raw.lastIndexOf("}");
+      if (start < 0 || end < start) {
+        resolve(null);
+        return;
+      }
+      try {
+        resolve(JSON.parse(raw.slice(start, end + 1)) as Record<string, unknown>);
+      } catch {
+        resolve(null);
+      }
+    });
+  });
+}
+
+/** Best-effort title of the first Feishu material link (minutes/docx/wiki) in `text`,
+ * read with the sidecar's bound Feishu user identity. Returns "" on any failure or
+ * timeout (≤10s) — callers keep their unresolved fallback. Used only when the
+ * followup command carries no explicit project name (#95 priority is unchanged). */
+export async function fetchFeishuMaterialTitle(text: string): Promise<string> {
+  const ref = firstFeishuLinkRef(text);
+  if (!ref) return "";
+
+  const fixtureRaw = process.env.WEIXIN_AGENT_FEISHU_TITLE_JSON;
+  if (fixtureRaw) {
+    try {
+      const fixture = JSON.parse(fixtureRaw) as Record<string, string>;
+      return String(fixture[ref.token] || "").trim();
+    } catch {
+      return "";
+    }
+  }
+
+  const appId = await resolveAppId();
+  const profileArgs = appId ? ["--profile", appId] : [];
+  try {
+    if (ref.kind === "minutes") {
+      const res = await runLarkCliJson(["api", "GET", `/open-apis/minutes/v1/minutes/${ref.token}`, "--as", "user", ...profileArgs]);
+      const minute = (res?.data as Record<string, unknown> | undefined)?.minute as Record<string, unknown> | undefined;
+      return String(minute?.title || "").trim();
+    }
+    if (ref.kind === "docx") {
+      const res = await runLarkCliJson(["api", "GET", `/open-apis/docx/v1/documents/${ref.token}`, "--as", "user", ...profileArgs]);
+      const document = (res?.data as Record<string, unknown> | undefined)?.document as Record<string, unknown> | undefined;
+      return String(document?.title || "").trim();
+    }
+    const res = await runLarkCliJson(["api", "GET", "/open-apis/wiki/v2/spaces/get_node", "--params", JSON.stringify({ token: ref.token }), "--as", "user", ...profileArgs]);
+    const node = (res?.data as Record<string, unknown> | undefined)?.node as Record<string, unknown> | undefined;
+    return String(node?.title || "").trim();
+  } catch {
+    return "";
+  }
 }
 
 /** Canonical 会议纪要(AI) entry format, matching what touziyun-bp.mjs follow writes

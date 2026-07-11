@@ -14,7 +14,7 @@ process.env.WEIXIN_AGENT_FEISHU_UNION_ID = "on_test_user_0001";
 process.env.WEIXIN_AGENT_FEISHU_NAME = "测试用户";
 delete process.env.TZY_PERUSER; // user key resolves to "default"; no live auth needed
 
-const MINUTE_LINK = "https://linear.feishu.cn/minutes/obcn_test_minute";
+const MINUTE_LINK = "https://linear.feishu.cn/minutes/obcn72h4testminute";
 
 function req(text: string, conversationId = "wx-conv-1"): ChatRequest {
   return { conversationId, text } as ChatRequest;
@@ -282,7 +282,77 @@ async function testMaterialFirstThenCommandConsumesInbox(): Promise<void> {
 
   const prompt = flow.takePendingModelPrompt(conversationId);
   assert.ok(prompt, "stage-2 must start directly");
-  assert.match(prompt!, /Material Inbox|minutes\/obcn_test_minute/, "stage-2 material must contain the stashed link");
+  assert.match(prompt!, /Material Inbox|minutes\/obcn72h4testminute/, "stage-2 material must contain the stashed link");
+  await flow.reset(conversationId);
+}
+
+async function testNaturalStrongPhraseRoutesWithInboxMaterial(): Promise<void> {
+  const { MaterialInbox } = await import("./material-inbox.ts");
+  const inbox = new MaterialInbox();
+  const conversationId = "wx-conv-nl-route";
+  inbox.stash(req(MINUTE_LINK, conversationId));
+
+  const flow = new WechatProjectFollowupFlow();
+  setSearchFixture({ ok: true, keyword: "星海科技", matches: [{ id: "p-100", name: "星海科技" }], autoPick: "p-100" });
+  setGetFixture({ ok: true, project: "p-100", projectName: "星海科技", meetingMemo: "", followup: "" });
+  process.env.WEIXIN_AGENT_FEISHU_TITLE_JSON = JSON.stringify({ obcn72h4testminute: "星海科技项目交流 2026-07-11" });
+
+  const routed = await flow.beforeAgent(req("帮我做项目跟进", conversationId), { materialInbox: inbox });
+  assert.ok(routed.handled, "strong NL phrase with inbox material must route into the command flow");
+  assert.match(
+    routed.handled ? routed.response.text || "" : "",
+    /已锁定投资云项目「星海科技」/,
+    "NL route + fetched material title must lock the project",
+  );
+  assert.equal(inbox.has(conversationId), false, "inbox material must be consumed by the NL route");
+  const prompt = flow.takePendingModelPrompt(conversationId);
+  assert.ok(prompt && prompt.includes("p-100"));
+  delete process.env.WEIXIN_AGENT_FEISHU_TITLE_JSON;
+  await flow.reset(conversationId);
+}
+
+async function testNaturalAmbiguousAsksExactlyOnce(): Promise<void> {
+  const flow = new WechatProjectFollowupFlow();
+  const conversationId = "wx-conv-nl-clarify";
+  const ambiguous = `跟进一下这个项目 ${MINUTE_LINK}`;
+
+  const first = await flow.beforeAgent(req(ambiguous, conversationId));
+  assert.ok(first.handled, "ambiguous followup wording with material must clarify");
+  assert.match(first.handled ? first.response.text || "" : "", /项目跟进/);
+
+  const second = await flow.beforeAgent(req(ambiguous, conversationId));
+  assert.equal(second.handled, false, "clarify happens exactly once, then falls through to the model");
+  await flow.reset(conversationId);
+}
+
+async function testNaturalPhraseWithoutMaterialPassesThrough(): Promise<void> {
+  const flow = new WechatProjectFollowupFlow();
+  const routed = await flow.beforeAgent(req("帮我做项目跟进", "wx-conv-nl-none"));
+  assert.equal(routed.handled, false, "NL entry is material-bearing only");
+}
+
+async function testBareLinkCommandUsesFetchedTitle(): Promise<void> {
+  const flow = new WechatProjectFollowupFlow();
+  const conversationId = "wx-conv-title";
+  setSearchFixture({ ok: true, keyword: "星海科技", matches: [{ id: "p-100", name: "星海科技" }], autoPick: "p-100" });
+  setGetFixture({ ok: true, project: "p-100", projectName: "星海科技", meetingMemo: "", followup: "" });
+  process.env.WEIXIN_AGENT_FEISHU_TITLE_JSON = JSON.stringify({ obcn72h4testminute: "星海科技项目交流 2026-07-11" });
+
+  const routed = await flow.beforeAgent(req(`/项目跟进 ${MINUTE_LINK}`, conversationId));
+  assert.ok(routed.handled);
+  assert.match(
+    routed.handled ? routed.response.text || "" : "",
+    /已锁定投资云项目「星海科技」/,
+    "bare-link command must resolve the keyword from the fetched Feishu title",
+  );
+
+  // Title unavailable → deterministic unresolved copy, no hang.
+  delete process.env.WEIXIN_AGENT_FEISHU_TITLE_JSON;
+  process.env.WEIXIN_AGENT_FEISHU_TITLE_JSON = JSON.stringify({});
+  const unresolved = await flow.beforeAgent(req(`/项目跟进 ${MINUTE_LINK}`, "wx-conv-title2"));
+  assert.ok(unresolved.handled);
+  assert.match(unresolved.handled ? unresolved.response.text || "" : "", /没能从这条消息确定要跟进的项目/);
+  delete process.env.WEIXIN_AGENT_FEISHU_TITLE_JSON;
   await flow.reset(conversationId);
 }
 
@@ -332,6 +402,10 @@ async function main(): Promise<void> {
   await testSwitchSupersedesOldDraftFailClosed();
   await testEmptyContentBlocksSubmit();
   await testMaterialFirstThenCommandConsumesInbox();
+  await testNaturalStrongPhraseRoutesWithInboxMaterial();
+  await testNaturalAmbiguousAsksExactlyOnce();
+  await testNaturalPhraseWithoutMaterialPassesThrough();
+  await testBareLinkCommandUsesFetchedTitle();
   await testMemoEntryFormatMatchesFeishuScript();
   await testKeywordPriorityExplicitBeatsMaterialTitle();
   await fs.rm(tmpHome, { recursive: true, force: true });
