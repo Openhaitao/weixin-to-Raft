@@ -1,6 +1,6 @@
 // Vendored from LinearOS src/card/card-intent-core.ts
-// source commit: 67fdd1ce1f63069735eb687a522b6704717d865c
-// source sha256: 58ad3d53cf4ded0fcfb09c4e6b136cc9afe69a3f2cdf688476d04b31b30ae3c5
+// source commit: 7d9fd96f7bcdab1b9f7f9137186bae98027225b2
+// source sha256: af19f89dae11d17e1673825180d9c503cbdbc07bf4a1bb684ff0373654c7a284
 // Do not edit by hand; run the drift sentinel after refreshing this file.
 // @ts-nocheck
 
@@ -800,7 +800,36 @@ export function parseProjectFollowupAppend(value: string, meetingDate = ''): Pro
   return sections;
 }
 
-/** Rebuild the one append-only field from the three editable preview sections. */
+export interface ProjectFollowupSummary {
+  meetingDate: string;
+  summary: string;
+}
+
+/** Split the append-only follow-up text into date + single editable summary body.
+ * The single-summary card projection: legacy three-section text (【本次新增】…) is
+ * preserved verbatim inside the summary so historical entries read back unchanged. */
+export function parseProjectFollowupSummary(value: string, meetingDate = ''): ProjectFollowupSummary {
+  let body = String(value || '').trim();
+  let date = String(meetingDate || '').trim();
+  const dateHeader = body.match(/^(\d{4}-\d{1,2}-\d{1,2})\s*[:：]\s*(?:\n|$)/);
+  if (dateHeader) {
+    date ||= dateHeader[1];
+    body = body.slice(dateHeader[0].length).trim();
+  }
+  return { meetingDate: date, summary: body };
+}
+
+/** Rebuild the one append-only field from the single edited summary. */
+export function composeProjectFollowupSummary(entry: ProjectFollowupSummary): string {
+  const summary = String(entry.summary || '').trim();
+  if (!summary) return '';
+  const date = String(entry.meetingDate || '').trim();
+  return date ? `${date}:\n${summary}` : summary;
+}
+
+/** Rebuild the one append-only field from the three editable preview sections.
+ * Legacy projection: kept so cards rendered before the single-summary switch can
+ * still submit through one release window (and for vendored consumers mid-refresh). */
 export function composeProjectFollowupAppend(sections: ProjectFollowupSections): string {
   const body = [
     ['本次新增', sections.newFacts],

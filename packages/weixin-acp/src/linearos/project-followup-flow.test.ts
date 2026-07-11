@@ -42,7 +42,7 @@ function draftMarker(projectId: string, overrides: Record<string, unknown> = {})
       meetingDate: "2026-07-11",
       meetingUrl: MINUTE_LINK,
       meetingMemoAppend: `2026-07-11：${MINUTE_LINK}`,
-      followupAppend: "【本次新增】完成 POC 验证\n【判断变化】置信度上调\n【下一步】两周内出报价",
+      followupAppend: "本次复谈确认完成 POC 验证，置信度上调；下一步两周内出报价。",
       historyStatus: "该项目在投资云暂无更早历史。",
       ...overrides,
     }),
@@ -74,9 +74,9 @@ async function buildDraft(flow: WechatProjectFollowupFlow, conversationId: strin
 
   const draftResponse = await flow.afterAgent(req("", conversationId), { text: draftMarker("p-100") });
   assert.match(draftResponse.text || "", /确认本次跟进 · 星海科技/);
-  assert.match(draftResponse.text || "", /1\. 本次新增：完成 POC 验证/);
-  assert.match(draftResponse.text || "", /2\. 判断变化：置信度上调/);
-  assert.match(draftResponse.text || "", /3\. 下一步：两周内出报价/);
+  assert.match(draftResponse.text || "", /1\. 会议总结（200-300 字，结论先行）：本次复谈确认完成 POC 验证/);
+  assert.match(draftResponse.text || "", /2\. 会议纪要链接：/);
+  assert.match(draftResponse.text || "", /3\. 会议日期：2026-07-11/);
   assert.match(draftResponse.text || "", /备选项目/);
   assert.match(draftResponse.text || "", /A\. 星海智能/);
 }
@@ -164,10 +164,10 @@ async function testProjectIdRewriteGetsOneSilentRetryThenFailsClosed(): Promise<
 async function testEditUpdatesSingleSection(): Promise<void> {
   const flow = new WechatProjectFollowupFlow();
   await buildDraft(flow, "wx-conv-edit");
-  const edited = await flow.beforeAgent(req("修改 下一步=下周安排合伙人会", "wx-conv-edit"));
+  const edited = await flow.beforeAgent(req("修改 会议总结=改后的总结正文，两句话。", "wx-conv-edit"));
   assert.ok(edited.handled);
-  assert.match(edited.handled ? edited.response.text || "" : "", /3\. 下一步：下周安排合伙人会/);
-  assert.match(edited.handled ? edited.response.text || "" : "", /1\. 本次新增：完成 POC 验证/);
+  assert.match(edited.handled ? edited.response.text || "" : "", /1\. 会议总结（200-300 字，结论先行）：改后的总结正文，两句话。/);
+  assert.match(edited.handled ? edited.response.text || "" : "", /3\. 会议日期：2026-07-11/);
   await flow.reset("wx-conv-edit");
 }
 
@@ -222,7 +222,7 @@ async function testSwitchSupersedesOldDraftFailClosed(): Promise<void> {
     projectId: "p-100",
     projectName: "星海科技",
     alternates: [],
-    sections: { meetingDate: "2026-07-11", newFacts: "旧草稿", judgmentChanges: "", nextSteps: "" },
+    summaryEntry: { meetingDate: "2026-07-11", summary: "旧草稿" },
     meetingMemoAppend: "",
     historyStatus: "x",
     historyEmpty: true,
@@ -250,9 +250,7 @@ async function testEmptyContentBlocksSubmit(): Promise<void> {
   const flow = new WechatProjectFollowupFlow();
   const conversationId = "wx-conv-empty";
   await buildDraft(flow, conversationId);
-  await flow.beforeAgent(req("修改 本次新增=", conversationId));
-  await flow.beforeAgent(req("修改 判断变化=", conversationId));
-  await flow.beforeAgent(req("修改 下一步=", conversationId));
+  await flow.beforeAgent(req("修改 会议总结=", conversationId));
   await flow.beforeAgent(req("修改 会议纪要链接=", conversationId));
   const blocked = await flow.beforeAgent(req("确认提交", conversationId));
   assert.ok(blocked.handled);
@@ -356,6 +354,43 @@ async function testBareLinkCommandUsesFetchedTitle(): Promise<void> {
   await flow.reset(conversationId);
 }
 
+async function testLegacySectionsDraftMigratesOnLoad(): Promise<void> {
+  const conversationId = "wx-conv-migrate";
+  const stateFile = path.join(tmpHome, "channels", "wechat", "project-followup-text-flow.json");
+  await fs.mkdir(path.dirname(stateFile), { recursive: true });
+  await fs.writeFile(stateFile, JSON.stringify({
+    states: {
+      [conversationId]: {
+        phase: "draft",
+        followupId: "wxf-legacy-1",
+        projectId: "p-100",
+        projectName: "星海科技",
+        alternates: [],
+        sections: { meetingDate: "2026-07-10", newFacts: "新增事实", judgmentChanges: "判断上调", nextSteps: "推进合同" },
+        meetingMemoAppend: "",
+        historyStatus: "x",
+        historyEmpty: true,
+        history: { status: "x", historyEmpty: true, meetingMemo: "", followup: "" },
+        materialText: "",
+        updatedAt: Date.now(),
+      },
+    },
+    submissions: {},
+  }));
+
+  const flow = new WechatProjectFollowupFlow();
+  const routed = await flow.beforeAgent(req("随便说点什么", conversationId));
+  assert.ok(routed.handled, "migrated legacy draft must still be an active draft");
+  const nudge = routed.handled ? routed.response.text || "" : "";
+  assert.match(nudge, /确认提交/, "migrated draft keeps the confirm path");
+
+  const edited = await flow.beforeAgent(req("修改 1=看看迁移后的正文", conversationId));
+  assert.ok(edited.handled);
+  assert.match(edited.handled ? edited.response.text || "" : "", /1\. 会议总结（200-300 字，结论先行）：看看迁移后的正文/);
+  assert.match(edited.handled ? edited.response.text || "" : "", /3\. 会议日期：2026-07-10/);
+  await flow.reset(conversationId);
+}
+
 async function testMemoEntryFormatMatchesFeishuScript(): Promise<void> {
   const { normalizeMemoEntry } = await import("./touziyun-shared.ts");
   const today = new Date().toISOString().slice(0, 10);
@@ -406,6 +441,7 @@ async function main(): Promise<void> {
   await testNaturalAmbiguousAsksExactlyOnce();
   await testNaturalPhraseWithoutMaterialPassesThrough();
   await testBareLinkCommandUsesFetchedTitle();
+  await testLegacySectionsDraftMigratesOnLoad();
   await testMemoEntryFormatMatchesFeishuScript();
   await testKeywordPriorityExplicitBeatsMaterialTitle();
   await fs.rm(tmpHome, { recursive: true, force: true });
