@@ -10,20 +10,31 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const packageRoot = path.resolve(here, "..");
 const linearosRepo = process.env.WEIXIN_AGENT_LINEAROS_REPO || process.env.LOS_REPO_DIR || path.join(os.homedir(), "multi-agent-in-feishu");
 
+const VENDORED_FILES: Array<{ sourceRel: string[]; vendorName: string }> = [
+  { sourceRel: ["src", "card", "card-intent-core.ts"], vendorName: "card-intent-core.ts" },
+  { sourceRel: ["src", "runtime", "followup-stage1.ts"], vendorName: "followup-stage1.ts" },
+  { sourceRel: ["src", "runtime", "followup-history.ts"], vendorName: "followup-history.ts" },
+];
+
 function stripVendorBanner(raw: string): string {
-  const bodyStart = raw.indexOf("/**");
-  assert.ok(bodyStart >= 0, "vendored core must keep source body after banner");
-  return raw.slice(bodyStart);
+  const lines = raw.split("\n");
+  let bodyStart = 0;
+  while (bodyStart < lines.length && /^\/\//.test(lines[bodyStart])) bodyStart += 1;
+  while (bodyStart < lines.length && lines[bodyStart].trim() === "") bodyStart += 1;
+  assert.ok(bodyStart > 0 && bodyStart < lines.length, "vendored file must keep source body after banner");
+  return lines.slice(bodyStart).join("\n");
 }
 
 async function assertVendorDriftClean(): Promise<void> {
-  const sourcePath = path.join(linearosRepo, "src", "card", "card-intent-core.ts");
-  const vendorPath = path.join(packageRoot, "src", "linearos", "vendor", "card-intent-core.ts");
-  const [source, vendor] = await Promise.all([
-    fs.readFile(sourcePath, "utf-8"),
-    fs.readFile(vendorPath, "utf-8"),
-  ]);
-  assert.equal(stripVendorBanner(vendor), source, "vendored card-intent-core.ts drifted from LinearOS source");
+  for (const entry of VENDORED_FILES) {
+    const sourcePath = path.join(linearosRepo, ...entry.sourceRel);
+    const vendorPath = path.join(packageRoot, "src", "linearos", "vendor", entry.vendorName);
+    const [source, vendor] = await Promise.all([
+      fs.readFile(sourcePath, "utf-8"),
+      fs.readFile(vendorPath, "utf-8"),
+    ]);
+    assert.equal(stripVendorBanner(vendor), source, `vendored ${entry.vendorName} drifted from LinearOS source`);
+  }
 }
 
 function installOptionFixture(): void {
