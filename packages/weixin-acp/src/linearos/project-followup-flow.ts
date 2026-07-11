@@ -16,6 +16,7 @@ import {
   buildFollowupStage2Prompt,
   type FollowupHistoryFact,
 } from "./vendor/followup-history.js";
+import { classifyNaturalFollowupEntry } from "./vendor/followup-natural-intent.js";
 import {
   classifyFollowupSearchResult,
   deriveFollowupSearchKeyword,
@@ -25,6 +26,8 @@ import {
 } from "./vendor/followup-stage1.js";
 import {
   buildAttachmentMaterial,
+  fetchFeishuMaterialTitle,
+  normalizeMemoEntry,
   pollTouziyunTextAuth,
   readJsonFile,
   resolveFeishuIdentity,
@@ -47,6 +50,7 @@ type FlowRoute =
 type MaterialInboxLike = {
   has(conversationId: string): boolean;
   mergeInto(request: ChatRequest): ChatRequest;
+  stash(request: ChatRequest): void;
 };
 
 type BeforeAgentOptions = {
@@ -95,6 +99,7 @@ type FlowState =
 
 const STATE_TTL_MS = 30 * 60 * 1000;
 const SUBMISSION_TTL_MS = 30 * 60 * 1000;
+const CLARIFY_ONCE_TTL_MS = 10 * 60 * 1000;
 const MAX_ALTERNATES = 4;
 const ALTERNATE_LETTERS = ["A", "B", "C", "D"] as const;
 
@@ -277,6 +282,7 @@ export class WechatProjectFollowupFlow {
   private readonly states = new Map<string, FlowState>();
   private readonly submissions = new Map<string, SubmissionRecord>();
   private readonly pendingModelPrompts = new Map<string, string>();
+  private readonly clarifyAskedAt = new Map<string, number>();
   private readonly stateFile = resolveWechatStateFile("project-followup-text-flow.json");
   private loaded = false;
 
@@ -302,7 +308,11 @@ export class WechatProjectFollowupFlow {
       return { handled: true, response: await this.startStage1(merged, text) };
     }
 
-    if (!existing) return { handled: false, request };
+    if (!existing) {
+      const natural = await this.routeNaturalEntry(request, text, options);
+      if (natural) return natural;
+      return { handled: false, request };
+    }
 
     if (existing.phase === "awaiting_material") {
       if (/^(取消|先不跟|放弃)$/i.test(text)) {
@@ -348,6 +358,39 @@ export class WechatProjectFollowupFlow {
 
     // draft phase
     return { handled: true, response: await this.handleDraftReply(request, existing) };
+  }
+
+  /** Deterministic NL ingress (vendored #99 semantics): strong followup phrasing with
+   * material (same turn or inbox) routes into the same command flow; ambiguous
+   * phrasing asks exactly once (then falls through to the model). */
+  private async routeNaturalEntry(
+    request: ChatRequest,
+    text: string,
+    options: BeforeAgentOptions,
+  ): Promise<FlowRoute | null> {
+    const inboxHas = options.materialInbox?.has(request.conversationId) ?? false;
+    const entry = classifyNaturalFollowupEntry({
+      text,
+      attachmentCount: (request.media ? 1 : 0) + (inboxHas ? 1 : 0),
+    });
+    if (entry.kind === "route") {
+      let effective: ChatRequest = { ...request, text: entry.normalizedText };
+      if (inboxHas && options.materialInbox) effective = options.materialInbox.mergeInto(effective);
+      return { handled: true, response: await this.startStage1(effective, entry.normalizedText) };
+    }
+    if (entry.kind === "clarify") {
+      const asked = this.clarifyAskedAt.get(request.conversationId) || 0;
+      if (Date.now() - asked < CLARIFY_ONCE_TTL_MS) return null;
+      this.clarifyAskedAt.set(request.conversationId, Date.now());
+      if (request.media || hasConcreteMaterial(request)) options.materialInbox?.stash(request);
+      return {
+        handled: true,
+        response: {
+          text: "看起来你想做项目跟进？回复 `/项目跟进 项目名` 我就开始（刚发的材料我已收好，会一起带上）；如果不是要跟进，直接继续说你的需求即可。",
+        },
+      };
+    }
+    return null;
   }
 
   private mergeInboxMaterial(request: ChatRequest, options: BeforeAgentOptions): ChatRequest {
@@ -440,9 +483,20 @@ export class WechatProjectFollowupFlow {
   private async startStage1(request: ChatRequest, text: string): Promise<ChatResponse> {
     const identity = await resolveFeishuIdentity();
     const userKey = await resolveTouziyunUserKey(identity);
+    const commandText = isFollowupCommand(text) ? text : `/项目跟进 ${text}`;
+
+    // Keyword priority stays explicit > material title (#95). Only when neither the
+    // command tail nor a local file name yields a keyword do we spend one bounded
+    // (≤10s) Feishu title lookup on the material link — the Feishu adapter gets the
+    // doc title for free from its material layer; the sidecar has to fetch it.
+    let materialTitle = materialTitleOf(request);
+    if (!deriveFollowupSearchKeyword({ text: commandText, materialTitle })) {
+      materialTitle = (await fetchFeishuMaterialTitle(request.text)) || materialTitle;
+    }
+
     const stage1 = await prepareStage1({
-      text: isFollowupCommand(text) ? text : `/项目跟进 ${text}`,
-      materialTitle: materialTitleOf(request),
+      text: commandText,
+      materialTitle,
       userKey,
       expectName: identity.userName || "",
     });
@@ -621,7 +675,8 @@ export class WechatProjectFollowupFlow {
     }
 
     const followupText = composeProjectFollowupAppend(state.sections);
-    const memoText = String(state.meetingMemoAppend || "").trim();
+    // Same canonical entry format as the create path: date-prefixed, full-width colon.
+    const memoText = normalizeMemoEntry(state.meetingMemoAppend, state.sections.meetingDate);
     if (!followupText.trim() && !memoText) {
       return { text: "没有可写入内容——跟进结论和会议纪要链接都是空的，请 `修改` 补充后再 `确认提交`。" };
     }

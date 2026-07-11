@@ -14,6 +14,7 @@ const VENDORED_FILES: Array<{ sourceRel: string[]; vendorName: string }> = [
   { sourceRel: ["src", "card", "card-intent-core.ts"], vendorName: "card-intent-core.ts" },
   { sourceRel: ["src", "runtime", "followup-stage1.ts"], vendorName: "followup-stage1.ts" },
   { sourceRel: ["src", "runtime", "followup-history.ts"], vendorName: "followup-history.ts" },
+  { sourceRel: ["src", "runtime", "followup-natural-intent.ts"], vendorName: "followup-natural-intent.ts" },
 ];
 
 function stripVendorBanner(raw: string): string {
@@ -108,6 +109,26 @@ async function assertHappyPath(): Promise<void> {
   const prepared = await __wechatProjectCreateTest.prepareFieldsForSubmit(normalized.fields, { userName: "Haitao" });
   assert.deepEqual(prepared.issues, []);
   assert.equal(prepared.submitFields["币种"], "USD");
+
+  // 会议纪要(AI) submit format must match the Feishu create path: date-prefixed link.
+  const bareMemo = await __wechatProjectCreateTest.prepareFieldsForSubmit(
+    { ...normalized.fields, 会议纪要: "https://linear.feishu.cn/minutes/obcnexample" },
+    { userName: "Haitao" },
+  );
+  assert.match(
+    bareMemo.submitFields["会议纪要"],
+    /^\d{4}-\d{2}-\d{2}：https:\/\/linear\.feishu\.cn\/minutes\/obcnexample$/,
+    "bare memo link must get a date prefix with full-width colon",
+  );
+  const datedMemo = await __wechatProjectCreateTest.prepareFieldsForSubmit(
+    { ...normalized.fields, 会议纪要: "2026-07-09: https://linear.feishu.cn/minutes/obcnexample" },
+    { userName: "Haitao" },
+  );
+  assert.equal(
+    datedMemo.submitFields["会议纪要"],
+    "2026-07-09：https://linear.feishu.cn/minutes/obcnexample",
+    "existing material date is preserved and colon unified",
+  );
   assert.equal(prepared.submitFields["拟初始融资轮次"], "round-seed");
   assert.equal(prepared.submitFields["来源同事"], "2066000000000000001");
   assert.equal(prepared.submitFields["项目来源"], "project-source-research");

@@ -9,6 +9,7 @@ import type { ChatRequest, ChatResponse } from "weixin-agent-sdk";
 import { looksLikePdf } from "./pdf-text.js";
 import {
   buildAttachmentMaterial,
+  normalizeMemoEntry,
   pollTouziyunTextAuth,
   readJsonFile,
   resolveFeishuIdentity,
@@ -554,6 +555,7 @@ async function buildExtractionPrompt(originalText: string, request: ChatRequest)
     "不要调用 touziyun-create.mjs，不要写投资云。微信侧会用文字草稿让用户确认后再写。",
     "",
     "抽取要点：项目名称优先取品牌/公司/产品名；公司创始人从 Team/Founder slide 提取；计划融资从 Ask/Fundraising 提取；拟初始融资轮次从 Ask/round 或材料语义判断。",
+    "会议纪要：材料里有会议纪要/妙记链接时写成 `YYYY-MM-DD：<链接>`（日期用材料里的会议日期，识别不到用今天）；没有链接就留空。",
     "一句话简介：一句中文讲清它在做什么，不要写成泛泛产品总结。",
     "Key-Takeaway：不是一句话总结，而是投资人视角的一手尽调要点 memo。必须按 4 块输出，每块单独一行并用【块名】开头，顺序固定为：",
     "【团队】创始人/核心成员的教育、职业、过往成就，要具体",
@@ -607,6 +609,12 @@ function missingRequired(fields: Record<string, string>): string[] {
 
 function fieldsForSubmit(fields: Record<string, string>): Record<string, string> {
   const next = { ...fields };
+  // 会议纪要(AI) must carry the meeting-date prefix like the Feishu create path
+  // (`YYYY-MM-DD：<链接>`); the extraction prompt asks the model for the material's
+  // date, this guard enforces the format (today as fallback) deterministically.
+  if (String(next["会议纪要"] || "").trim()) {
+    next["会议纪要"] = normalizeMemoEntry(next["会议纪要"]);
+  }
   const textPlaceholders = new Set(["公司创始人", "一句话简介", "来源同事"]);
   for (const field of PROJECT_DRAFT_SCHEMA) {
     if (!field.required) continue;
