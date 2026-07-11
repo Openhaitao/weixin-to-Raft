@@ -5,11 +5,13 @@ import type { ChatRequest, ChatResponse } from "weixin-agent-sdk";
 import {
   classifyDraftReply,
   composeProjectFollowupAppend,
-  parseProjectFollowupAppend,
+  composeProjectFollowupSummary,
+  parseProjectFollowupSummary,
   parseProjectFollowupDraftDirectiveResult,
   validateCardIntent,
   type ProjectDraftSchemaField,
   type ProjectFollowupSections,
+  type ProjectFollowupSummary,
 } from "./vendor/card-intent-core.js";
 import {
   buildFollowupHistoryFact,
@@ -87,7 +89,9 @@ type FlowState =
       projectId: string;
       projectName: string;
       alternates: Candidate[];
-      sections: ProjectFollowupSections;
+      summaryEntry: ProjectFollowupSummary;
+      /** Legacy pre-single-summary draft shape; migrated on load. */
+      sections?: ProjectFollowupSections;
       meetingMemoAppend: string;
       historyStatus: string;
       historyEmpty: boolean;
@@ -103,13 +107,11 @@ const CLARIFY_ONCE_TTL_MS = 10 * 60 * 1000;
 const MAX_ALTERNATES = 4;
 const ALTERNATE_LETTERS = ["A", "B", "C", "D"] as const;
 
-/** Text-editable projection of the single followup confirmation card: the three
- * conclusion sections plus meeting link/date. Numeric indexes address these in
- * order, exactly like the Feishu card's separate inputs. */
+/** Text-editable projection of the single followup confirmation card: one 会议总结
+ * body plus meeting link/date. Numeric indexes address these in order, exactly
+ * like the Feishu card's inputs. */
 const FOLLOWUP_EDIT_SCHEMA: ProjectDraftSchemaField[] = [
-  { name: "followup_new", label: "本次新增", kind: "multiline" },
-  { name: "followup_change", label: "判断变化", kind: "multiline" },
-  { name: "followup_next", label: "下一步", kind: "multiline" },
+  { name: "followup_summary", label: "会议总结", kind: "multiline" },
   { name: "meetingMemo", label: "会议纪要链接", kind: "single" },
   { name: "meetingDate", label: "会议日期", kind: "single" },
 ];
@@ -227,10 +229,9 @@ function buildWechatStage2Prompt(args: {
     "",
     "输出格式（微信侧严格要求）：先用一两句话自然说明，然后输出一个 marker 块，JSON 放在两行 marker 之间：",
     "[[PROJECT_FOLLOWUP_DRAFT]]",
-    `{"projectId":"${args.projectId}","projectName":"${args.projectName}","meetingDate":"YYYY-MM-DD","meetingUrl":"材料里的会议纪要链接，没有就空串","meetingMemoAppend":"YYYY-MM-DD：<纪要链接>，没有链接就空串","followupAppend":"【本次新增】…\\n【判断变化】…\\n【下一步】…","historyStatus":"原样复制上面脚本结果里的 historyStatus"}`,
+    `{"projectId":"${args.projectId}","projectName":"${args.projectName}","meetingDate":"YYYY-MM-DD","meetingUrl":"材料里的会议纪要链接，没有就空串","meetingMemoAppend":"YYYY-MM-DD：<纪要链接>，没有链接就空串","followupAppend":"<单段会议总结，200-300 字，按上面要素清单/硬约束写>","historyStatus":"原样复制上面脚本结果里的 historyStatus"}`,
     "[[/PROJECT_FOLLOWUP_DRAFT]]",
     "规则：projectId 必须原样使用，不能改写；historyStatus 必须原样复制脚本结果，不由你推断；",
-    "followupAppend 必须包含【本次新增】【判断变化】【下一步】三段（某段确实没有内容可留空段落但保留其他段）；",
     "只读本次材料与上面注入的历史，不要调用任何搜索或写库工具；不要输出 ::card:: 块。",
     "",
     "[本次会议材料]",
@@ -253,16 +254,14 @@ function renderDraftText(state: Extract<FlowState, { phase: "draft" }>): string 
   const lines = [
     `📝 确认本次跟进 · ${state.projectName || state.projectId}`,
     "",
-    `会议日期：${state.sections.meetingDate || "（未识别）"}`,
-    `1. 本次新增：${value(state.sections.newFacts)}`,
-    `2. 判断变化：${value(state.sections.judgmentChanges)}`,
-    `3. 下一步：${value(state.sections.nextSteps)}`,
-    `4. 会议纪要链接：${value(state.meetingMemoAppend)}`,
+    `1. 会议总结（200-300 字，结论先行）：${value(state.summaryEntry.summary)}`,
+    `2. 会议纪要链接：${value(state.meetingMemoAppend)}`,
+    `3. 会议日期：${state.summaryEntry.meetingDate || "（未识别）"}`,
     "",
     state.historyEmpty ? "（该项目在投资云暂无更早历史，本次为首条跟进）" : "（写入方式为追加，不覆盖历史跟进）",
     ...renderAlternatesLines(state.alternates),
     "",
-    "回复 `确认提交` 写入投资云；`修改 1=新值` 或 `本次新增=新值` 编辑（多行内容一次改一段）；`取消` 放弃。",
+    "回复 `确认提交` 写入投资云；`修改 1=新值` 或 `会议总结=新值` 编辑；`取消` 放弃。",
   ];
   return lines.join("\n");
 }
@@ -453,14 +452,14 @@ export class WechatProjectFollowupFlow {
 
     // Script truth overrides model output (same as Feishu PR #58 semantics): the
     // history status shown/persisted comes from the get-script result, never the model.
-    const sections = parseProjectFollowupAppend(String(intent.followupAppend || ""), String(intent.meetingDate || ""));
+    const summaryEntry = parseProjectFollowupSummary(String(intent.followupAppend || ""), String(intent.meetingDate || ""));
     const draft: Extract<FlowState, { phase: "draft" }> = {
       phase: "draft",
       followupId: state.followupId,
       projectId: state.projectId,
       projectName: state.projectName || String(intent.projectName || ""),
       alternates: state.alternates,
-      sections,
+      summaryEntry,
       meetingMemoAppend: String(intent.meetingMemoAppend || ""),
       historyStatus: state.history.status,
       historyEmpty: state.history.historyEmpty,
@@ -607,11 +606,9 @@ export class WechatProjectFollowupFlow {
     if (reply.kind === "edit" && reply.updates) {
       const next: Extract<FlowState, { phase: "draft" }> = {
         ...state,
-        sections: {
-          meetingDate: reply.updates.meetingDate ?? state.sections.meetingDate,
-          newFacts: reply.updates.followup_new ?? state.sections.newFacts,
-          judgmentChanges: reply.updates.followup_change ?? state.sections.judgmentChanges,
-          nextSteps: reply.updates.followup_next ?? state.sections.nextSteps,
+        summaryEntry: {
+          meetingDate: reply.updates.meetingDate ?? state.summaryEntry.meetingDate,
+          summary: reply.updates.followup_summary ?? state.summaryEntry.summary,
         },
         meetingMemoAppend: reply.updates.meetingMemo ?? state.meetingMemoAppend,
         updatedAt: Date.now(),
@@ -674,9 +671,9 @@ export class WechatProjectFollowupFlow {
       };
     }
 
-    const followupText = composeProjectFollowupAppend(state.sections);
+    const followupText = composeProjectFollowupSummary(state.summaryEntry);
     // Same canonical entry format as the create path: date-prefixed, full-width colon.
-    const memoText = normalizeMemoEntry(state.meetingMemoAppend, state.sections.meetingDate);
+    const memoText = normalizeMemoEntry(state.meetingMemoAppend, state.summaryEntry.meetingDate);
     if (!followupText.trim() && !memoText) {
       return { text: "没有可写入内容——跟进结论和会议纪要链接都是空的，请 `修改` 补充后再 `确认提交`。" };
     }
@@ -703,7 +700,7 @@ export class WechatProjectFollowupFlow {
     try {
       const args = [resolveTouziyunBpScript(), "follow", "--project", state.projectId, "--user", userKey];
       if (userKey !== "default") args.push("--expect-name", identity.userName || "用户");
-      if (state.sections.meetingDate) args.push("--date", state.sections.meetingDate);
+      if (state.summaryEntry.meetingDate) args.push("--date", state.summaryEntry.meetingDate);
       if (memoText) args.push("--memo-append", memoText);
       if (followupText) args.push("--followup-append", followupText);
       const result = await runFollowupWrite(args);
@@ -738,6 +735,15 @@ export class WechatProjectFollowupFlow {
     if (this.loaded) return;
     const raw = await readJsonFile<{ states?: Record<string, FlowState>; submissions?: Record<string, SubmissionRecord> }>(this.stateFile, {});
     for (const [conversationId, state] of Object.entries(raw.states || {})) {
+      // Migrate a pre-single-summary draft persisted across the upgrade (30-min TTL
+      // makes this rare): recompose its three sections into one summary body.
+      if (state.phase === "draft" && !state.summaryEntry && state.sections) {
+        state.summaryEntry = parseProjectFollowupSummary(
+          composeProjectFollowupAppend(state.sections),
+          state.sections.meetingDate,
+        );
+        delete state.sections;
+      }
       this.states.set(conversationId, state);
     }
     for (const [followupId, record] of Object.entries(raw.submissions || {})) {
