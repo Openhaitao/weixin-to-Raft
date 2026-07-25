@@ -14,6 +14,7 @@ function assertCanonicalPaths(): void {
   const wrapper = fs.readFileSync(path.join(repoRoot, "scripts", "wechat-bind-demo.mjs"), "utf-8");
   assert.match(wrapper, /packages["'],\s*["']weixin-acp["']/, "wrapper must resolve packages/weixin-acp");
   assert.doesNotMatch(wrapper, /packages["'],\s*["']agent-acp["']/, "wrapper must not resolve retired agent-acp");
+  assert.match(wrapper, /resolveStartArgs\(rest,\s*bot\.wechatDir,\s*bot\.promptFile\)/);
   const cli = fs.readFileSync(path.join(packageRoot, "main.ts"), "utf-8");
   assert.match(cli, /WEIXIN_LOGIN_QR/);
   assert.match(cli, /WEIXIN_LOGIN_DONE/);

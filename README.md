@@ -54,11 +54,11 @@ node scripts/wechat-bind-demo.mjs status hel9000
 # 为指定 bot 生成微信扫码登录二维码，登录态写入 ~/.linearos/agents/hel9000/channels/wechat/
 node scripts/wechat-bind-demo.mjs login hel9000
 
-# 用同一个 bot persona 启动微信 sidecar（默认 codex-acp）
+# 用同一个 bot persona 启动微信 sidecar（默认 claude-agent-acp）
 node scripts/wechat-bind-demo.mjs start hel9000
 
 # 或使用其他 ACP agent
-node scripts/wechat-bind-demo.mjs start hel9000 -- claude-agent-acp
+node scripts/wechat-bind-demo.mjs start hel9000 -- codex-acp
 ```
 
 脚本用于 LinearOS 飞书 `/wechat` 绑定后的 sidecar：

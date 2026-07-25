@@ -77,6 +77,47 @@ export function createModelSelectionConfig(
   };
 }
 
+export function isCodexAcpBackend(
+  command: string,
+  args: string[] = [],
+): boolean {
+  const executable = path.basename(command).toLowerCase();
+  const isCodexPackage = (value: string | undefined): boolean => {
+    const normalized = value?.toLowerCase();
+    return normalized === "codex-acp"
+      || normalized === "@agentclientprotocol/codex-acp";
+  };
+  if (executable === "codex-acp" || executable === "codex-acp.cmd") {
+    return true;
+  }
+  if (["npx", "pnpx", "bunx"].includes(executable)) {
+    const backendArg = args.find((arg) => arg !== "--" && !arg.startsWith("-"));
+    return isCodexPackage(backendArg);
+  }
+  if (executable === "pnpm") {
+    const [subcommand, backendArg] = args;
+    return (subcommand === "dlx" || subcommand === "exec")
+      && isCodexPackage(backendArg);
+  }
+  if (executable === "yarn") {
+    const [subcommand, backendArg] = args;
+    return subcommand === "dlx" && isCodexPackage(backendArg);
+  }
+  return false;
+}
+
+export function createBackendModelSelectionConfig(
+  command: string,
+  args: string[] = [],
+  env: NodeJS.ProcessEnv = process.env,
+  createConfig: (source: NodeJS.ProcessEnv) => ModelSelectionConfig | null
+    = createModelSelectionConfig,
+): ModelSelectionConfig | null {
+  return isCodexAcpBackend(command, args)
+    ? createConfig(env)
+    : null;
+}
+
 export class ModelSelectionStore {
   private readonly allowed: Set<string>;
 

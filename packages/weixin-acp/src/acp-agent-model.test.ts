@@ -7,7 +7,10 @@ import type { SessionId, SessionModelState } from "@agentclientprotocol/sdk";
 
 import { AcpAgent } from "./acp-agent.js";
 import type { AcpClient, AcpConnectionLike } from "./acp-connection.js";
-import { ModelSelectionStore } from "./model-selection.js";
+import {
+  createBackendModelSelectionConfig,
+  ModelSelectionStore,
+} from "./model-selection.js";
 import { ResponseCollector } from "./response-collector.js";
 
 const allowlist = ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"];
@@ -27,6 +30,7 @@ const advertisedModels: SessionModelState = {
 class FakeAcpConnection implements AcpConnectionLike {
   readonly events: string[] = [];
   disposeCount = 0;
+  setModelCount = 0;
   private sequence = 0;
   private collectors = new Map<SessionId, ResponseCollector>();
 
@@ -73,6 +77,7 @@ class FakeAcpConnection implements AcpConnectionLike {
   }
 
   async setSessionModel(sessionId: SessionId, modelId: string): Promise<void> {
+    this.setModelCount += 1;
     if (!advertisedModels.availableModels.some((model) => model.modelId === modelId)) {
       throw new Error("ACP rejected model");
     }
@@ -162,6 +167,46 @@ try {
   );
   assert.equal(disabledAgent.getModelMenu, undefined);
   assert.equal(disabledAgent.selectModel, undefined);
+
+  const claudeHome = path.join(root, "claude-bot");
+  const claudeStatePath = path.join(
+    claudeHome,
+    "channels",
+    "wechat",
+    "model-selection.json",
+  );
+  const claudeConnection = new FakeAcpConnection();
+  let claudeStoreConstructionCount = 0;
+  const claudeAgent = new AcpAgent(
+    {
+      command: "claude-agent-acp",
+      modelSelection: createBackendModelSelectionConfig(
+        "claude-agent-acp",
+        [],
+        {
+          WEIXIN_AGENT_HOME: claudeHome,
+          WEIXIN_AGENT_MODEL_ALLOWLIST: allowlist.join(","),
+        },
+        () => {
+          claudeStoreConstructionCount += 1;
+          throw new Error("Claude must not construct model-selection state");
+        },
+      ),
+    },
+    () => claudeConnection,
+  );
+  assert.equal(claudeAgent.getModelMenu, undefined);
+  assert.equal(claudeAgent.selectModel, undefined);
+  assert.equal(claudeStoreConstructionCount, 0);
+  assert.equal(fs.existsSync(claudeStatePath), false);
+  await claudeAgent.chat({ conversationId: "claude-conversation", text: "hello Claude" });
+  assert.deepEqual(claudeConnection.events, [
+    "ready",
+    "new:session-1",
+    "prompt:session-1",
+  ]);
+  assert.equal(claudeConnection.setModelCount, 0);
+  assert.equal(fs.existsSync(claudeStatePath), false);
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
 }

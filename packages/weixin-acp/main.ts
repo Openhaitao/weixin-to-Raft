@@ -18,7 +18,7 @@ import fs from "node:fs";
 import { isLoggedIn, login, logout, start } from "weixin-agent-sdk";
 
 import { AcpAgent } from "./src/acp-agent.js";
-import { createModelSelectionConfig } from "./src/model-selection.js";
+import { createBackendModelSelectionConfig } from "./src/model-selection.js";
 
 /** Built-in agent shortcuts */
 const BUILTIN_AGENTS: Record<string, { command: string }> = {
@@ -72,7 +72,7 @@ async function startAgent(acpCommand: string, acpArgs: string[] = [], opts: CliO
     args: acpArgs,
     cwd: opts.cwd,
     systemPrompt: readSystemPrompt(opts.systemPromptFile),
-    modelSelection: createModelSelectionConfig(),
+    modelSelection: createBackendModelSelectionConfig(acpCommand, acpArgs),
   });
 
   const ac = new AbortController();

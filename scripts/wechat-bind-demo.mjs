@@ -4,6 +4,11 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import {
+  buildAgentEnv,
+  buildBotPath,
+  resolveStartArgs,
+} from "./wechat-bind-demo-lib.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
@@ -107,19 +112,12 @@ function resolveLocalWeixinAcpMain() {
   return fs.existsSync(built) ? built : undefined;
 }
 
-function buildBotPath(agentHome, env = process.env) {
-  const runtimeBin = path.join(agentHome, "runtime", "bin");
-  const currentPath = env.PATH || "";
-  return currentPath ? `${runtimeBin}${path.delimiter}${currentPath}` : runtimeBin;
-}
-
 function buildEnv(bot) {
   const identityPath = path.join(bot.wechatDir, "bound-feishu-identity.json");
   const identity = readJsonSafe(identityPath, {});
   return {
-    ...process.env,
-    ...bot.config,
-    PATH: buildBotPath(bot.agentHome),
+    ...buildAgentEnv(process.env, bot.config),
+    PATH: buildBotPath(bot.agentHome, process.env.PATH || "", path.delimiter),
     LOS_HOME: bot.agentHome,
     CTI_HOME: bot.agentHome,
     LOS_SHARED_DIR: process.env.LOS_SHARED_DIR || path.join(os.homedir(), ".linearos", "shared"),
@@ -225,26 +223,7 @@ try {
       runWeixinAcp(bot, ["logout"]);
       break;
     case "start": {
-      const ddIndex = rest.indexOf("--");
-      if (ddIndex === -1) {
-        runWeixinAcp(bot, [
-          "codex",
-          "--cwd", bot.wechatDir,
-          "--system-prompt-file", bot.promptFile,
-        ]);
-      } else {
-        const acpArgs = rest.slice(ddIndex + 1);
-        if (acpArgs.length === 0) {
-          throw new Error("missing ACP command after --");
-        }
-        runWeixinAcp(bot, [
-          "start",
-          "--cwd", bot.wechatDir,
-          "--system-prompt-file", bot.promptFile,
-          "--",
-          ...acpArgs,
-        ]);
-      }
+      runWeixinAcp(bot, resolveStartArgs(rest, bot.wechatDir, bot.promptFile));
       break;
     }
     default:

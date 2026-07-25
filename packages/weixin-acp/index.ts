@@ -1,6 +1,8 @@
 export { AcpAgent } from "./src/acp-agent.js";
 export {
+  createBackendModelSelectionConfig,
   createModelSelectionConfig,
+  isCodexAcpBackend,
   ModelSelectionStore,
   parseConcreteModelId,
   parseModelAllowlist,

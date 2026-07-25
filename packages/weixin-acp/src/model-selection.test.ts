@@ -4,7 +4,9 @@ import os from "node:os";
 import path from "node:path";
 
 import {
+  createBackendModelSelectionConfig,
   createModelSelectionConfig,
+  isCodexAcpBackend,
   ModelSelectionStore,
   parseModelAllowlist,
 } from "./model-selection.js";
@@ -23,6 +25,60 @@ try {
     () => createModelSelectionConfig({ WEIXIN_AGENT_MODEL_ALLOWLIST: allowlist.join(",") }),
     /WEIXIN_AGENT_HOME is required/,
   );
+  const backendEnv = {
+    WEIXIN_AGENT_HOME: root,
+    WEIXIN_AGENT_MODEL_ALLOWLIST: allowlist.join(","),
+  };
+  assert.equal(isCodexAcpBackend("claude-agent-acp"), false);
+  assert.equal(isCodexAcpBackend("/usr/local/bin/codex-acp"), true);
+  assert.equal(
+    isCodexAcpBackend("npx", ["@agentclientprotocol/codex-acp"]),
+    true,
+  );
+  assert.equal(isCodexAcpBackend("npx", ["--yes", "codex-acp"]), true);
+  assert.equal(
+    isCodexAcpBackend("pnpm", ["dlx", "@agentclientprotocol/codex-acp"]),
+    true,
+  );
+  assert.equal(isCodexAcpBackend("pnpm", ["exec", "codex-acp"]), true);
+  assert.equal(
+    isCodexAcpBackend("yarn", ["dlx", "@agentclientprotocol/codex-acp"]),
+    true,
+  );
+  assert.equal(isCodexAcpBackend("pnpm", ["run", "codex-acp"]), false);
+  assert.equal(
+    isCodexAcpBackend("pnpm", ["dlx", "@agentclientprotocol/codex-acp-evil"]),
+    false,
+  );
+  assert.equal(isCodexAcpBackend("yarn", ["exec", "codex-acp"]), false);
+  assert.equal(isCodexAcpBackend("pnpm", []), false);
+  assert.equal(isCodexAcpBackend("pnpm", ["dlx"]), false);
+  assert.equal(isCodexAcpBackend("pnpm", ["--silent", "dlx", "codex-acp"]), false);
+  assert.equal(isCodexAcpBackend("pnpm", ["exec", "extra", "codex-acp"]), false);
+  assert.equal(
+    isCodexAcpBackend("pnpm", ["dlx", "@agentclientprotocol/claude-agent-acp"]),
+    false,
+  );
+  assert.equal(isCodexAcpBackend("unknown-runner", ["codex-acp"]), false);
+  assert.equal(isCodexAcpBackend("yarn", ["--silent", "dlx", "codex-acp"]), false);
+  assert.equal(isCodexAcpBackend("pnpm.cmd", ["dlx", "codex-acp"]), false);
+  assert.equal(isCodexAcpBackend("yarn.cmd", ["dlx", "codex-acp"]), false);
+  assert.equal(isCodexAcpBackend("node", ["./unknown-agent.js"]), false);
+  let claudeConfigFactoryCalls = 0;
+  assert.equal(
+    createBackendModelSelectionConfig(
+      "claude-agent-acp",
+      [],
+      backendEnv,
+      () => {
+        claudeConfigFactoryCalls += 1;
+        throw new Error("Claude must not construct a model store");
+      },
+    ),
+    null,
+  );
+  assert.equal(claudeConfigFactoryCalls, 0);
+  assert.ok(createBackendModelSelectionConfig("codex-acp", [], backendEnv));
 
   const botA = new ModelSelectionStore(
     path.join(root, "bot-a", "channels", "wechat", "model-selection.json"),
