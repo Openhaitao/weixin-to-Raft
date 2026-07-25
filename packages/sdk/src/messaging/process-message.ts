@@ -128,8 +128,8 @@ export async function processOneMessage(
   }
   const textBody = extractTextBody(full.item_list);
 
-  // --- Slash commands ---
-  if (textBody.startsWith("/")) {
+  // --- Slash commands and short-lived command followups ---
+  if (textBody) {
     const conversationId = full.from_user_id ?? "";
     const slashResult = await handleSlashCommand(
       textBody,
@@ -142,6 +142,12 @@ export async function processOneMessage(
         log: deps.log,
         errLog: deps.errLog,
         onClear: () => deps.agent.clearSession?.(conversationId),
+        getModelMenu: deps.agent.getModelMenu
+          ? () => deps.agent.getModelMenu!(conversationId)
+          : undefined,
+        selectModel: deps.agent.selectModel
+          ? (modelId) => deps.agent.selectModel!(conversationId, modelId)
+          : undefined,
       },
       receivedAt,
       full.create_time_ms,
