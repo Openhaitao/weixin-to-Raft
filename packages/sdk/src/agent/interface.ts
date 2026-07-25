@@ -13,6 +13,26 @@ export interface Agent {
   shouldShowTyping?(request: ChatRequest): Promise<boolean> | boolean;
   /** Clear/reset the session for a given conversation. */
   clearSession?(conversationId: string): void;
+  /** Return the authoritative model menu for this agent. */
+  getModelMenu?(conversationId: string): Promise<AgentModelMenu>;
+  /** Validate and persist a bot-wide model selection. */
+  selectModel?(conversationId: string, modelId: string): Promise<AgentModelSelection>;
+}
+
+export interface AgentModelOption {
+  id: string;
+  name: string;
+  description?: string;
+}
+
+export interface AgentModelMenu {
+  currentModelId?: string;
+  options: AgentModelOption[];
+}
+
+export interface AgentModelSelection {
+  modelId: string;
+  name: string;
 }
 
 export interface ChatRequest {

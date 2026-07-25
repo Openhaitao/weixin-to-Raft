@@ -24,10 +24,23 @@ function describeToolCall(update: {
   return update.title ?? update.kind ?? update.toolCallId ?? "tool";
 }
 
+export type AcpClient = Pick<
+  ClientSideConnection,
+  "newSession" | "prompt" | "unstable_setSessionModel"
+>;
+
+export interface AcpConnectionLike {
+  ensureReady(): Promise<AcpClient>;
+  registerCollector(sessionId: SessionId, collector: ResponseCollector): void;
+  unregisterCollector(sessionId: SessionId): void;
+  setSessionModel(sessionId: SessionId, modelId: string): Promise<void>;
+  dispose(): void;
+}
+
 /**
  * Manages the ACP agent subprocess and ClientSideConnection lifecycle.
  */
-export class AcpConnection {
+export class AcpConnection implements AcpConnectionLike {
   private process: ChildProcess | null = null;
   private connection: ClientSideConnection | null = null;
   private ready = false;
@@ -66,6 +79,7 @@ export class AcpConnection {
     this.process = proc;
 
     proc.on("exit", (code) => {
+      if (this.process !== proc) return;
       log(`subprocess exited (code=${code})`);
       this.ready = false;
       this.connection = null;
@@ -125,6 +139,11 @@ export class AcpConnection {
     this.connection = conn;
     this.ready = true;
     return conn;
+  }
+
+  async setSessionModel(sessionId: SessionId, modelId: string): Promise<void> {
+    const connection = await this.ensureReady();
+    await connection.unstable_setSessionModel({ sessionId, modelId });
   }
 
   /**
