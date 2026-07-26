@@ -26,6 +26,9 @@ function log(msg: string) {
   console.log(`[acp] ${msg}`);
 }
 
+const STALE_MODEL_NOTICE =
+  "你之前选的型号已不可用，已回到默认型号；可发 /model 重新选择。";
+
 function isEmptyUserContentError(err: unknown): boolean {
   const message = err instanceof Error ? err.message : String(err);
   return /user messages must have non-empty content/.test(message);
@@ -45,6 +48,7 @@ export class AcpAgent implements Agent {
   private materialInbox = new MaterialInbox();
   private options: AcpAgentOptions;
   private modelQueue: Promise<void> = Promise.resolve();
+  private staleModelNotices = new Set<string>();
 
   readonly getModelMenu?: (conversationId: string) => Promise<AgentModelMenu>;
   readonly selectModel?: (
@@ -187,6 +191,12 @@ export class AcpAgent implements Agent {
     let response = await this.projectFollowupFlow.afterAgent(request, await collector.toResponse());
     response = await this.runFollowupModelTurns(request, response);
     response = await this.projectCreateFlow.afterAgent(request, response);
+    if (this.staleModelNotices.delete(request.conversationId)) {
+      response = {
+        ...response,
+        text: [STALE_MODEL_NOTICE, response.text].filter(Boolean).join("\n\n"),
+      };
+    }
     log(`response: ${response.text?.slice(0, 80) ?? "[no text]"}${response.media ? " +media" : ""}`);
     return response;
   }
@@ -260,17 +270,35 @@ export class AcpAgent implements Agent {
 
     const persistedModelId = this.options.modelSelection?.store.read();
     if (persistedModelId) {
-      try {
-        this.assertModelAvailable(res.models, persistedModelId);
-        await this.connection.setSessionModel(res.sessionId, persistedModelId);
-        this.sessionModels.set(
-          conversationId,
-          this.withCurrentModel(res.models, persistedModelId),
+      const config = this.options.modelSelection!;
+      if (
+        config.strategy === "acp-advertised"
+        && !this.isModelAvailable(res.models, persistedModelId)
+      ) {
+        log(
+          `WARNING persisted model unavailable; falling back to ACP default`
+          + ` conversation=${conversationId} persisted=${persistedModelId}`
+          + ` default=${res.models?.currentModelId ?? "unknown"}`,
         );
-        log(`restored model selection: ${persistedModelId}`);
-      } catch (err) {
-        this.resetAcpRuntime();
-        throw err;
+        config.store.clear();
+        this.staleModelNotices.add(conversationId);
+      } else {
+        try {
+          if (!this.isModelAvailable(res.models, persistedModelId)) {
+            throw new Error(
+              `persisted model is unavailable from the candidate ACP: ${persistedModelId}`,
+            );
+          }
+          await this.connection.setSessionModel(res.sessionId, persistedModelId);
+          this.sessionModels.set(
+            conversationId,
+            this.withCurrentModel(res.models, persistedModelId),
+          );
+          log(`restored model selection: ${persistedModelId}`);
+        } catch (err) {
+          this.resetAcpRuntime();
+          throw err;
+        }
       }
     }
     return res.sessionId;
@@ -295,7 +323,13 @@ export class AcpAgent implements Agent {
   ): Promise<AgentModelSelection> {
     return this.withModelLock(async () => {
       const config = this.options.modelSelection;
-      if (!config || !config.allowlist.includes(modelId)) {
+      if (
+        !config
+        || (
+          config.strategy === "codex-family"
+          && !config.allowlist.includes(modelId)
+        )
+      ) {
         throw new Error("model is not in the bot allowlist");
       }
 
@@ -319,6 +353,7 @@ export class AcpAgent implements Agent {
         throw err;
       }
 
+      this.staleModelNotices.delete(conversationId);
       this.resetAcpRuntime();
       log(`model selection persisted: ${concreteModelId}; ACP will restart lazily`);
       return { modelId, name: option.name };
@@ -326,8 +361,18 @@ export class AcpAgent implements Agent {
   }
 
   private allowedModels(state: SessionModelState | null | undefined): AgentModelMenu["options"] {
-    const allowlist = this.options.modelSelection?.allowlist ?? [];
+    const config = this.options.modelSelection;
     if (!state) return [];
+    if (config?.strategy === "acp-advertised") {
+      return state.availableModels.map((model) => ({
+        id: model.modelId,
+        name: model.name,
+        description: model.description ?? undefined,
+      }));
+    }
+    const allowlist = config?.strategy === "codex-family"
+      ? config.allowlist
+      : [];
     return allowlist.flatMap((modelId) => {
       const concreteModelId = this.tryResolveConcreteModelId(state, modelId);
       if (!concreteModelId) return [];
@@ -352,6 +397,9 @@ export class AcpAgent implements Agent {
     options: AgentModelMenu["options"],
   ): string | undefined {
     if (!currentModelId) return undefined;
+    if (this.options.modelSelection?.strategy === "acp-advertised") {
+      return options.find((option) => option.id === currentModelId)?.id;
+    }
     let family: string;
     try {
       family = parseConcreteModelId(currentModelId).family;
@@ -361,29 +409,35 @@ export class AcpAgent implements Agent {
     return options.find((option) => option.id === family)?.id;
   }
 
-  private assertModelAvailable(
+  private isModelAvailable(
     state: SessionModelState | null | undefined,
     modelId: string,
-  ): void {
+  ): boolean {
+    const config = this.options.modelSelection;
+    if (!state || !config) return false;
+    if (config.strategy === "acp-advertised") {
+      return state.availableModels.some((model) => model.modelId === modelId);
+    }
     let family: string;
     try {
       family = parseConcreteModelId(modelId).family;
     } catch {
-      throw new Error(`persisted model ID is invalid: ${modelId}`);
+      return false;
     }
-    if (
-      !state
-      || !this.options.modelSelection?.allowlist.includes(family)
-      || !state.availableModels.some((model) => model.modelId === modelId)
-    ) {
-      throw new Error(`persisted model is unavailable from the candidate ACP: ${modelId}`);
-    }
+    return config.allowlist.includes(family)
+      && state.availableModels.some((model) => model.modelId === modelId);
   }
 
   private resolveConcreteModelId(
     state: SessionModelState | null | undefined,
     family: string,
   ): string {
+    if (this.options.modelSelection?.strategy === "acp-advertised") {
+      if (state?.availableModels.some((model) => model.modelId === family)) {
+        return family;
+      }
+      throw new Error(`model is unavailable from the candidate ACP: ${family}`);
+    }
     const modelId = this.tryResolveConcreteModelId(state, family);
     if (!modelId) {
       throw new Error(`model family is unavailable from the candidate ACP: ${family}`);
