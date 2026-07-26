@@ -8,19 +8,22 @@ import {
 
 const cwd = "/tmp/bot/channels/wechat";
 const prompt = `${cwd}/CLAUDE.md`;
+const memory = "/tmp/bot/memory";
 
-assert.deepEqual(resolveStartArgs([], cwd, prompt), [
+assert.deepEqual(resolveStartArgs([], cwd, prompt, memory), [
   "start",
   "--cwd", cwd,
   "--system-prompt-file", prompt,
+  "--memory-dir", memory,
   "--",
   "claude-agent-acp",
 ]);
 
-assert.deepEqual(resolveStartArgs(["--", "custom-acp", "--flag"], cwd, prompt), [
+assert.deepEqual(resolveStartArgs(["--", "custom-acp", "--flag"], cwd, prompt, memory), [
   "start",
   "--cwd", cwd,
   "--system-prompt-file", prompt,
+  "--memory-dir", memory,
   "--",
   "custom-acp",
   "--flag",

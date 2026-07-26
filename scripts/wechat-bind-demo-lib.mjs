@@ -1,9 +1,10 @@
-export function resolveStartArgs(rest, cwd, systemPromptFile) {
+export function resolveStartArgs(rest, cwd, systemPromptFile, memoryDir) {
   const ddIndex = rest.indexOf("--");
   const common = [
     "start",
     "--cwd", cwd,
     "--system-prompt-file", systemPromptFile,
+    "--memory-dir", memoryDir,
     "--",
   ];
   if (ddIndex === -1) {

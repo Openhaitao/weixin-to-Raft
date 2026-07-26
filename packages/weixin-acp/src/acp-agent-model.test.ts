@@ -29,6 +29,7 @@ const advertisedModels: SessionModelState = {
 
 class FakeAcpConnection implements AcpConnectionLike {
   readonly events: string[] = [];
+  readonly prompts: Array<{ sessionId: SessionId; text: string[] }> = [];
   disposeCount = 0;
   setModelCount = 0;
   private sequence = 0;
@@ -46,8 +47,14 @@ class FakeAcpConnection implements AcpConnectionLike {
         },
       };
     },
-    prompt: async ({ sessionId }) => {
+    prompt: async ({ sessionId, prompt }) => {
       this.events.push(`prompt:${sessionId}`);
+      this.prompts.push({
+        sessionId,
+        text: prompt
+          .filter((block: { type: string }) => block.type === "text")
+          .map((block: { type: string; text?: string }) => block.text || ""),
+      });
       this.collectors.get(sessionId)?.handleUpdate({
         sessionId,
         update: {
@@ -167,6 +174,10 @@ try {
   );
   assert.equal(disabledAgent.getModelMenu, undefined);
   assert.equal(disabledAgent.selectModel, undefined);
+  assert.throws(
+    () => new AcpAgent({ command: "fake-acp", memoryDir: "relative/memory" }),
+    /memoryDir must be an absolute path/,
+  );
 
   const claudeHome = path.join(root, "claude-bot");
   const claudeStatePath = path.join(
@@ -207,6 +218,51 @@ try {
   ]);
   assert.equal(claudeConnection.setModelCount, 0);
   assert.equal(fs.existsSync(claudeStatePath), false);
+
+  const memoryDir = path.join(root, "memory-bot", "memory");
+  fs.mkdirSync(memoryDir, { recursive: true });
+  fs.writeFileSync(path.join(memoryDir, "MEMORY.md"), "- [tea.md](tea.md) 茶偏好\n");
+  fs.writeFileSync(path.join(memoryDir, "tea.md"), [
+    "---",
+    "name: tea",
+    "description: 用户喜欢乌龙茶",
+    "metadata.type: user",
+    "metadata.scope: private",
+    "---",
+    "用户最喜欢凤凰单丛。",
+  ].join("\n"));
+  const memoryConnection = new FakeAcpConnection();
+  const memoryAgent = new AcpAgent(
+    {
+      command: "fake-acp",
+      memoryDir,
+      systemPrompt: "persona",
+    },
+    () => memoryConnection,
+  );
+  await memoryAgent.chat({ conversationId: "memory-conversation", text: "我喜欢什么茶？" });
+  assert.match(memoryConnection.prompts[0].text[0], /\[System instructions\]\npersona/);
+  assert.match(memoryConnection.prompts[0].text[1], /记忆目录：/);
+  assert.match(memoryConnection.prompts[0].text[1], /用户最喜欢凤凰单丛/);
+  assert.equal(memoryConnection.prompts[0].text.at(-1), "我喜欢什么茶？");
+
+  fs.writeFileSync(path.join(memoryDir, "tea.md"), [
+    "---",
+    "name: tea",
+    "description: 用户喜欢乌龙茶",
+    "metadata.type: user",
+    "metadata.scope: private",
+    "---",
+    "用户现在最喜欢岩茶。",
+  ].join("\n"));
+  await memoryAgent.chat({ conversationId: "memory-conversation", text: "现在喜欢什么茶？" });
+  assert.equal(memoryConnection.prompts[1].text.some((text) => text.includes("[System instructions]")), false);
+  assert.match(memoryConnection.prompts[1].text[0], /用户现在最喜欢岩茶/);
+
+  memoryAgent.clearSession("memory-conversation");
+  await memoryAgent.chat({ conversationId: "memory-conversation", text: "新会话喜欢什么茶？" });
+  assert.match(memoryConnection.prompts[2].text[0], /\[System instructions\]\npersona/);
+  assert.match(memoryConnection.prompts[2].text[1], /用户现在最喜欢岩茶/);
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
 }

@@ -14,6 +14,7 @@
  */
 
 import fs from "node:fs";
+import path from "node:path";
 
 import { isLoggedIn, login, logout, start } from "weixin-agent-sdk";
 
@@ -31,11 +32,13 @@ const command = process.argv[2];
 type CliOptions = {
   cwd?: string;
   systemPromptFile?: string;
+  memoryDir?: string;
 };
 
 function parseCliOptions(args: string[]): CliOptions {
   let cwd: string | undefined;
   let systemPromptFile: string | undefined;
+  let memoryDir: string | undefined;
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -47,9 +50,16 @@ function parseCliOptions(args: string[]): CliOptions {
       systemPromptFile = args[++i];
       continue;
     }
+    if (arg === "--memory-dir") {
+      memoryDir = args[++i];
+      continue;
+    }
   }
 
-  return { cwd, systemPromptFile };
+  if (memoryDir && !path.isAbsolute(memoryDir)) {
+    throw new Error("--memory-dir must be an absolute path");
+  }
+  return { cwd, systemPromptFile, memoryDir };
 }
 
 function readSystemPrompt(filePath?: string): string | undefined {
@@ -72,6 +82,7 @@ async function startAgent(acpCommand: string, acpArgs: string[] = [], opts: CliO
     args: acpArgs,
     cwd: opts.cwd,
     systemPrompt: readSystemPrompt(opts.systemPromptFile),
+    memoryDir: opts.memoryDir,
     modelSelection: createBackendModelSelectionConfig(acpCommand, acpArgs),
   });
 
@@ -144,6 +155,7 @@ async function main() {
 选项:
   --cwd <dir>                                    ACP session 工作目录
   --system-prompt-file <file>                    新会话注入的系统提示词
+  --memory-dir <dir>                             每轮召回的 LinearOS 绝对记忆目录
 
 示例:
   npx weixin-acp claude-code --system-prompt-file ./CLAUDE.md

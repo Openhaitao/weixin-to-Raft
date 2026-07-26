@@ -6,6 +6,7 @@ import type {
   ChatResponse,
 } from "weixin-agent-sdk";
 import type { SessionId, SessionModelState } from "@agentclientprotocol/sdk";
+import path from "node:path";
 
 import type { AcpAgentOptions } from "./types.js";
 import {
@@ -14,6 +15,7 @@ import {
   type AcpConnectionLike,
 } from "./acp-connection.js";
 import { convertRequestToContentBlocks } from "./content-converter.js";
+import { buildRecallInjection } from "./linearos/vendor/recall.js";
 import { WechatProjectCreateFlow } from "./linearos/project-create-flow.js";
 import { WechatProjectFollowupFlow } from "./linearos/project-followup-flow.js";
 import { ResponseCollector } from "./response-collector.js";
@@ -55,6 +57,9 @@ export class AcpAgent implements Agent {
     connectionFactory: (onExit: () => void) => AcpConnectionLike = (onExit) =>
       new AcpConnection(options, onExit),
   ) {
+    if (options.memoryDir && !path.isAbsolute(options.memoryDir)) {
+      throw new Error("memoryDir must be an absolute path");
+    }
     this.options = options;
     this.connection = connectionFactory(() => {
       log("subprocess exited, clearing session cache");
@@ -122,10 +127,21 @@ export class AcpAgent implements Agent {
     // Get or create an ACP session for this conversation
     const sessionId = await this.getOrCreateSession(request.conversationId, conn, request.timing?.receivedAt);
 
+    const memoryRecall = this.options.memoryDir
+      ? buildRecallInjection(this.options.memoryDir, request.text || "")
+      : "";
+
     // Convert the ChatRequest to ACP ContentBlock[]
     const blocks = await convertRequestToContentBlocks(request);
     if (blocks.length === 0) {
       return { text: "" };
+    }
+
+    if (memoryRecall) {
+      blocks.unshift({
+        type: "text",
+        text: memoryRecall,
+      });
     }
 
     if (this.options.systemPrompt && !this.systemPromptSent.has(request.conversationId)) {
