@@ -84,26 +84,14 @@ function resolveBot(slug) {
   const wechatDir = path.join(agentHome, "channels", "wechat");
   const legacyWechatDir = path.join(agentHome, "wechat");
   const promptFile = path.join(wechatDir, "CLAUDE.md");
-  return { slug, agentHome, configPath, profilePath, config, wechatDir, legacyWechatDir, promptFile };
+  const memoryDir = path.join(agentHome, "memory");
+  return { slug, agentHome, configPath, profilePath, config, wechatDir, legacyWechatDir, promptFile, memoryDir };
 }
 
-function writePromptFile(bot) {
-  fs.mkdirSync(bot.wechatDir, { recursive: true });
-  const botName = bot.config.CTI_BOT_NAME || bot.slug;
-  const persona = bot.config.CTI_BOT_PERSONA || `你是 ${botName}。`;
-  const prompt = [
-    `# ${botName} WeChat Persona`,
-    "",
-    persona,
-    "",
-    "你现在通过微信和用户私聊。微信是个人私密入口，飞书是团队协作入口。",
-    "保持和飞书侧一致的身份、语气、边界和工作方式；不要声称自己是另一个 bot。",
-    "微信和飞书共享同一个 bot 的长期记忆边界；短期会话上下文按 channel 独立，不要把某个平台的原始私聊内容泄露到另一个平台。",
-    "普通微信回复不要展示 `::card::`、`::field::` 或 `[[...]]` 卡片协议；只有当系统/项目创建流程明确要求输出 `::card:: project_draft` 结构化草稿时，按要求输出，微信 sidecar 会在发给用户前转换成文字草稿。",
-    "如果用户发送 `/new`，微信通道会开启一段新会话；如果用户发送 `/clear`，微信通道会清理当前会话上下文。重置后继续保持同一个 persona。",
-    "",
-  ].join("\n");
-  fs.writeFileSync(bot.promptFile, prompt, "utf-8");
+function requirePromptFile(bot) {
+  if (!fs.existsSync(bot.promptFile)) {
+    throw new Error(`LinearOS WeChat prompt not found: ${bot.promptFile}`);
+  }
   return bot.promptFile;
 }
 
@@ -210,7 +198,6 @@ if (!command || command === "-h" || command === "--help") {
 
 try {
   const bot = resolveBot(slug);
-  bot.promptFile = writePromptFile(bot);
 
   switch (command) {
     case "status":
@@ -223,7 +210,8 @@ try {
       runWeixinAcp(bot, ["logout"]);
       break;
     case "start": {
-      runWeixinAcp(bot, resolveStartArgs(rest, bot.wechatDir, bot.promptFile));
+      bot.promptFile = requirePromptFile(bot);
+      runWeixinAcp(bot, resolveStartArgs(rest, bot.wechatDir, bot.promptFile, bot.memoryDir));
       break;
     }
     default:

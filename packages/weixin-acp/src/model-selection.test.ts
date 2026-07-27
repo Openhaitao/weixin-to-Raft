@@ -6,6 +6,7 @@ import path from "node:path";
 import {
   createBackendModelSelectionConfig,
   createModelSelectionConfig,
+  classifyAcpBackend,
   isCodexAcpBackend,
   ModelSelectionStore,
   parseModelAllowlist,
@@ -29,6 +30,23 @@ try {
     WEIXIN_AGENT_HOME: root,
     WEIXIN_AGENT_MODEL_ALLOWLIST: allowlist.join(","),
   };
+  assert.equal(classifyAcpBackend("claude-agent-acp"), "claude");
+  assert.equal(
+    classifyAcpBackend("npx", ["--yes", "@agentclientprotocol/claude-agent-acp"]),
+    "claude",
+  );
+  assert.equal(
+    classifyAcpBackend("pnpm", ["dlx", "claude-agent-acp"]),
+    "claude",
+  );
+  assert.equal(
+    classifyAcpBackend("yarn", ["dlx", "@agentclientprotocol/claude-agent-acp"]),
+    "claude",
+  );
+  assert.equal(
+    classifyAcpBackend("npx", ["claude-agent-acp-evil"]),
+    "unsupported",
+  );
   assert.equal(isCodexAcpBackend("claude-agent-acp"), false);
   assert.equal(isCodexAcpBackend("/usr/local/bin/codex-acp"), true);
   assert.equal(
@@ -64,20 +82,22 @@ try {
   assert.equal(isCodexAcpBackend("pnpm.cmd", ["dlx", "codex-acp"]), false);
   assert.equal(isCodexAcpBackend("yarn.cmd", ["dlx", "codex-acp"]), false);
   assert.equal(isCodexAcpBackend("node", ["./unknown-agent.js"]), false);
-  let claudeConfigFactoryCalls = 0;
-  assert.equal(
-    createBackendModelSelectionConfig(
+  let codexConfigFactoryCalls = 0;
+  const claudeConfig = createBackendModelSelectionConfig(
       "claude-agent-acp",
       [],
       backendEnv,
       () => {
-        claudeConfigFactoryCalls += 1;
-        throw new Error("Claude must not construct a model store");
+        codexConfigFactoryCalls += 1;
+        throw new Error("Claude must not read the Codex allowlist");
       },
-    ),
-    null,
   );
-  assert.equal(claudeConfigFactoryCalls, 0);
+  assert.equal(claudeConfig?.strategy, "acp-advertised");
+  assert.equal(codexConfigFactoryCalls, 0);
+  assert.equal(
+    claudeConfig?.store.filePath,
+    path.join(root, "channels", "wechat", "model-selection.json"),
+  );
   assert.ok(createBackendModelSelectionConfig("codex-acp", [], backendEnv));
 
   const botA = new ModelSelectionStore(
@@ -112,6 +132,21 @@ try {
   fs.symlinkSync(botB.filePath, botA.filePath);
   assert.throws(() => botA.read(), /single regular file/);
   assert.throws(() => botA.write("gpt-5.6-sol[medium]"), /single regular file/);
+
+  const dynamic = new ModelSelectionStore(
+    path.join(root, "claude", "channels", "wechat", "model-selection.json"),
+    { strategy: "acp-advertised" },
+  );
+  dynamic.write("claude-opus-fixture");
+  assert.equal(dynamic.read(), "claude-opus-fixture");
+  dynamic.clear();
+  assert.equal(dynamic.read(), undefined);
+  dynamic.clear();
+  assert.throws(() => dynamic.write("../bad model"), /invalid ACP model id/);
+
+  dynamic.write("claude-stale-fixture");
+  fs.chmodSync(dynamic.filePath, 0o644);
+  assert.throws(() => dynamic.clear(), /permissions must be 0600/);
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
 }

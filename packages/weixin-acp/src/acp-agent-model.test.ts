@@ -29,10 +29,12 @@ const advertisedModels: SessionModelState = {
 
 class FakeAcpConnection implements AcpConnectionLike {
   readonly events: string[] = [];
+  readonly prompts: Array<{ sessionId: SessionId; text: string[] }> = [];
   disposeCount = 0;
   setModelCount = 0;
   private sequence = 0;
   private collectors = new Map<SessionId, ResponseCollector>();
+  constructor(private readonly models: SessionModelState = advertisedModels) {}
 
   private readonly client: AcpClient = {
     newSession: async () => {
@@ -41,13 +43,19 @@ class FakeAcpConnection implements AcpConnectionLike {
       return {
         sessionId,
         models: {
-          ...advertisedModels,
-          availableModels: advertisedModels.availableModels.map((model) => ({ ...model })),
+          ...this.models,
+          availableModels: this.models.availableModels.map((model) => ({ ...model })),
         },
       };
     },
-    prompt: async ({ sessionId }) => {
+    prompt: async ({ sessionId, prompt }) => {
       this.events.push(`prompt:${sessionId}`);
+      this.prompts.push({
+        sessionId,
+        text: prompt
+          .filter((block: { type: string }) => block.type === "text")
+          .map((block: { type: string; text?: string }) => block.text || ""),
+      });
       this.collectors.get(sessionId)?.handleUpdate({
         sessionId,
         update: {
@@ -78,7 +86,7 @@ class FakeAcpConnection implements AcpConnectionLike {
 
   async setSessionModel(sessionId: SessionId, modelId: string): Promise<void> {
     this.setModelCount += 1;
-    if (!advertisedModels.availableModels.some((model) => model.modelId === modelId)) {
+    if (!this.models.availableModels.some((model) => model.modelId === modelId)) {
       throw new Error("ACP rejected model");
     }
     this.events.push(`set:${sessionId}:${modelId}`);
@@ -98,7 +106,7 @@ function createAgent(
   return new AcpAgent(
     {
       command: "fake-acp",
-      modelSelection: { allowlist, store },
+      modelSelection: { strategy: "codex-family", allowlist, store },
     },
     () => connection,
   );
@@ -167,6 +175,10 @@ try {
   );
   assert.equal(disabledAgent.getModelMenu, undefined);
   assert.equal(disabledAgent.selectModel, undefined);
+  assert.throws(
+    () => new AcpAgent({ command: "fake-acp", memoryDir: "relative/memory" }),
+    /memoryDir must be an absolute path/,
+  );
 
   const claudeHome = path.join(root, "claude-bot");
   const claudeStatePath = path.join(
@@ -175,8 +187,23 @@ try {
     "wechat",
     "model-selection.json",
   );
-  const claudeConnection = new FakeAcpConnection();
-  let claudeStoreConstructionCount = 0;
+  const claudeModels: SessionModelState = {
+    currentModelId: "claude-sonnet-fixture",
+    availableModels: [
+      {
+        modelId: "claude-sonnet-fixture",
+        name: "Sonnet Fixture",
+        description: "default fixture",
+      },
+      {
+        modelId: "claude-opus-fixture",
+        name: "Opus 5 Fixture",
+        description: "large fixture",
+      },
+    ],
+  };
+  const claudeConnection = new FakeAcpConnection(claudeModels);
+  let codexConfigFactoryCalls = 0;
   const claudeAgent = new AcpAgent(
     {
       command: "claude-agent-acp",
@@ -188,25 +215,246 @@ try {
           WEIXIN_AGENT_MODEL_ALLOWLIST: allowlist.join(","),
         },
         () => {
-          claudeStoreConstructionCount += 1;
-          throw new Error("Claude must not construct model-selection state");
+          codexConfigFactoryCalls += 1;
+          throw new Error("Claude must not read the Codex allowlist");
         },
       ),
     },
     () => claudeConnection,
   );
-  assert.equal(claudeAgent.getModelMenu, undefined);
-  assert.equal(claudeAgent.selectModel, undefined);
-  assert.equal(claudeStoreConstructionCount, 0);
+  assert.ok(claudeAgent.getModelMenu);
+  assert.ok(claudeAgent.selectModel);
+  assert.equal(codexConfigFactoryCalls, 0);
   assert.equal(fs.existsSync(claudeStatePath), false);
-  await claudeAgent.chat({ conversationId: "claude-conversation", text: "hello Claude" });
-  assert.deepEqual(claudeConnection.events, [
+  const claudeMenu = await claudeAgent.getModelMenu("claude-conversation");
+  assert.equal(claudeMenu.currentModelId, "claude-sonnet-fixture");
+  assert.deepEqual(
+    claudeMenu.options,
+    [
+      {
+        id: "claude-sonnet-fixture",
+        name: "Sonnet Fixture",
+        description: "default fixture",
+      },
+      {
+        id: "claude-opus-fixture",
+        name: "Opus 5 Fixture",
+        description: "large fixture",
+      },
+    ],
+  );
+  assert.equal(
+    claudeMenu.options.some((option) => option.id.startsWith("gpt-")),
+    false,
+  );
+  await assert.rejects(
+    () => claudeAgent.selectModel!("claude-conversation", "gpt-5.6-sol"),
+    /not available from the candidate ACP/,
+  );
+  const claudeSelected = await claudeAgent.selectModel(
+    "claude-conversation",
+    "claude-opus-fixture",
+  );
+  assert.deepEqual(claudeSelected, {
+    modelId: "claude-opus-fixture",
+    name: "Opus 5 Fixture",
+  });
+  assert.equal(
+    JSON.parse(fs.readFileSync(claudeStatePath, "utf8")).modelId,
+    "claude-opus-fixture",
+  );
+  assert.equal(fs.statSync(claudeStatePath).mode & 0o777, 0o600);
+
+  const restoredClaudeConnection = new FakeAcpConnection(claudeModels);
+  const restoredClaudeAgent = new AcpAgent(
+    {
+      command: "claude-agent-acp",
+      modelSelection: createBackendModelSelectionConfig(
+        "claude-agent-acp",
+        [],
+        {
+          WEIXIN_AGENT_HOME: claudeHome,
+          WEIXIN_AGENT_MODEL_ALLOWLIST: allowlist.join(","),
+        },
+      ),
+    },
+    () => restoredClaudeConnection,
+  );
+  await restoredClaudeAgent.chat({
+    conversationId: "restored-claude",
+    text: "hello restored Claude",
+  });
+  assert.deepEqual(restoredClaudeConnection.events, [
     "ready",
     "new:session-1",
+    "set:session-1:claude-opus-fixture",
     "prompt:session-1",
   ]);
-  assert.equal(claudeConnection.setModelCount, 0);
+
+  const staleModels: SessionModelState = {
+    currentModelId: "claude-sonnet-fixture",
+    availableModels: [claudeModels.availableModels[0]],
+  };
+  const staleConnection = new FakeAcpConnection(staleModels);
+  const staleAgent = new AcpAgent(
+    {
+      command: "claude-agent-acp",
+      modelSelection: createBackendModelSelectionConfig(
+        "claude-agent-acp",
+        [],
+        { WEIXIN_AGENT_HOME: claudeHome },
+      ),
+    },
+    () => staleConnection,
+  );
+  const staleLogs: string[] = [];
+  const originalConsoleLog = console.log;
+  console.log = (...args: unknown[]) => {
+    staleLogs.push(args.map(String).join(" "));
+  };
+  let staleResponse;
+  try {
+    staleResponse = await staleAgent.chat({
+      conversationId: "stale-claude",
+      text: "hello after retirement",
+    });
+  } finally {
+    console.log = originalConsoleLog;
+  }
+  assert.match(staleResponse.text ?? "", /你之前选的型号已不可用/);
+  assert.match(staleResponse.text ?? "", /ok/);
+  assert.equal(
+    staleLogs.some((line) =>
+      line.includes("WARNING persisted model unavailable")
+      && line.includes("default=claude-sonnet-fixture")
+    ),
+    true,
+  );
+  assert.equal(staleConnection.setModelCount, 0);
   assert.equal(fs.existsSync(claudeStatePath), false);
+  const nextResponse = await staleAgent.chat({
+    conversationId: "stale-claude",
+    text: "second message",
+  });
+  assert.equal(nextResponse.text, "ok");
+
+  const staleBeforeReselectStore = new ModelSelectionStore(
+    claudeStatePath,
+    { strategy: "acp-advertised" },
+  );
+  staleBeforeReselectStore.write("claude-opus-fixture");
+  const reselectConnection = new FakeAcpConnection(staleModels);
+  const reselectAgent = new AcpAgent(
+    {
+      command: "claude-agent-acp",
+      modelSelection: {
+        strategy: "acp-advertised",
+        store: staleBeforeReselectStore,
+      },
+    },
+    () => reselectConnection,
+  );
+  await reselectAgent.getModelMenu!("reselect-claude");
+  await reselectAgent.selectModel!(
+    "reselect-claude",
+    "claude-sonnet-fixture",
+  );
+  const afterReselect = await reselectAgent.chat({
+    conversationId: "reselect-claude",
+    text: "selection fixed",
+  });
+  assert.equal(afterReselect.text, "ok");
+
+  const unsafeStore = new ModelSelectionStore(
+    claudeStatePath,
+    { strategy: "acp-advertised" },
+  );
+  unsafeStore.write("claude-sonnet-fixture");
+  fs.chmodSync(claudeStatePath, 0o644);
+  const unsafeAgent = new AcpAgent(
+    {
+      command: "claude-agent-acp",
+      modelSelection: {
+        strategy: "acp-advertised",
+        store: unsafeStore,
+      },
+    },
+    () => new FakeAcpConnection(staleModels),
+  );
+  await assert.rejects(
+    () => unsafeAgent.chat({
+      conversationId: "unsafe-claude",
+      text: "must not mask unsafe state",
+    }),
+    /permissions must be 0600/,
+  );
+  fs.chmodSync(claudeStatePath, 0o600);
+  fs.unlinkSync(claudeStatePath);
+
+  const emptyModels: SessionModelState = {
+    currentModelId: "",
+    availableModels: [],
+  };
+  const emptyAgent = new AcpAgent(
+    {
+      command: "claude-agent-acp",
+      modelSelection: createBackendModelSelectionConfig(
+        "claude-agent-acp",
+        [],
+        { WEIXIN_AGENT_HOME: path.join(root, "empty-claude") },
+      ),
+    },
+    () => new FakeAcpConnection(emptyModels),
+  );
+  assert.deepEqual(
+    await emptyAgent.getModelMenu!("empty-claude"),
+    { currentModelId: undefined, options: [] },
+  );
+
+  const memoryDir = path.join(root, "memory-bot", "memory");
+  fs.mkdirSync(memoryDir, { recursive: true });
+  fs.writeFileSync(path.join(memoryDir, "MEMORY.md"), "- [tea.md](tea.md) 茶偏好\n");
+  fs.writeFileSync(path.join(memoryDir, "tea.md"), [
+    "---",
+    "name: tea",
+    "description: 用户喜欢乌龙茶",
+    "metadata.type: user",
+    "metadata.scope: private",
+    "---",
+    "用户最喜欢凤凰单丛。",
+  ].join("\n"));
+  const memoryConnection = new FakeAcpConnection();
+  const memoryAgent = new AcpAgent(
+    {
+      command: "fake-acp",
+      memoryDir,
+      systemPrompt: "persona",
+    },
+    () => memoryConnection,
+  );
+  await memoryAgent.chat({ conversationId: "memory-conversation", text: "我喜欢什么茶？" });
+  assert.match(memoryConnection.prompts[0].text[0], /\[System instructions\]\npersona/);
+  assert.match(memoryConnection.prompts[0].text[1], /记忆目录：/);
+  assert.match(memoryConnection.prompts[0].text[1], /用户最喜欢凤凰单丛/);
+  assert.equal(memoryConnection.prompts[0].text.at(-1), "我喜欢什么茶？");
+
+  fs.writeFileSync(path.join(memoryDir, "tea.md"), [
+    "---",
+    "name: tea",
+    "description: 用户喜欢乌龙茶",
+    "metadata.type: user",
+    "metadata.scope: private",
+    "---",
+    "用户现在最喜欢岩茶。",
+  ].join("\n"));
+  await memoryAgent.chat({ conversationId: "memory-conversation", text: "现在喜欢什么茶？" });
+  assert.equal(memoryConnection.prompts[1].text.some((text) => text.includes("[System instructions]")), false);
+  assert.match(memoryConnection.prompts[1].text[0], /用户现在最喜欢岩茶/);
+
+  memoryAgent.clearSession("memory-conversation");
+  await memoryAgent.chat({ conversationId: "memory-conversation", text: "新会话喜欢什么茶？" });
+  assert.match(memoryConnection.prompts[2].text[0], /\[System instructions\]\npersona/);
+  assert.match(memoryConnection.prompts[2].text[1], /用户现在最喜欢岩茶/);
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
 }

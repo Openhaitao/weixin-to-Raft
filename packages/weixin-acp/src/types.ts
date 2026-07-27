@@ -11,6 +11,8 @@ export type AcpAgentOptions = {
   cwd?: string;
   /** System instructions inserted at the beginning of each new conversation. */
   systemPrompt?: string;
+  /** Absolute LinearOS memory directory used for per-turn recall injection. */
+  memoryDir?: string;
   /** Prompt timeout in milliseconds (default: 120_000) */
   promptTimeoutMs?: number;
   /** Optional bot-local model selection policy and state store. */

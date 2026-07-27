@@ -15,6 +15,8 @@ const VENDORED_FILES: Array<{ sourceRel: string[]; vendorName: string }> = [
   { sourceRel: ["src", "runtime", "followup-stage1.ts"], vendorName: "followup-stage1.ts" },
   { sourceRel: ["src", "runtime", "followup-history.ts"], vendorName: "followup-history.ts" },
   { sourceRel: ["src", "runtime", "followup-natural-intent.ts"], vendorName: "followup-natural-intent.ts" },
+  { sourceRel: ["src", "memory", "store.ts"], vendorName: "store.ts" },
+  { sourceRel: ["src", "memory", "recall.ts"], vendorName: "recall.ts" },
 ];
 
 function stripVendorBanner(raw: string): string {

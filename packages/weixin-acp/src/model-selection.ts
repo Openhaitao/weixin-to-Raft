@@ -5,6 +5,7 @@ import path from "node:path";
 const MODEL_FAMILY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const MODEL_EFFORT_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$/;
 const CONCRETE_MODEL_PATTERN = /^(.+)\[([^\[\]]+)\]$/;
+const ACP_MODEL_ID_PATTERN = /^[^\s\u0000-\u001f\u007f]{1,256}$/;
 const MAX_MODEL_OPTIONS = 20;
 const MAX_STATE_BYTES = 4096;
 
@@ -14,10 +15,20 @@ interface ModelSelectionState {
   updatedAt: string;
 }
 
-export interface ModelSelectionConfig {
+export interface CodexModelSelectionConfig {
+  strategy: "codex-family";
   allowlist: string[];
   store: ModelSelectionStore;
 }
+
+export interface AcpAdvertisedModelSelectionConfig {
+  strategy: "acp-advertised";
+  store: ModelSelectionStore;
+}
+
+export type ModelSelectionConfig =
+  | CodexModelSelectionConfig
+  | AcpAdvertisedModelSelectionConfig;
 
 function validateModelFamily(modelId: string): string {
   const normalized = modelId.trim();
@@ -69,41 +80,67 @@ export function createModelSelectionConfig(
     throw new Error("WEIXIN_AGENT_HOME must be absolute for model selection");
   }
   return {
+    strategy: "codex-family",
     allowlist,
     store: new ModelSelectionStore(
       path.join(agentHome, "channels", "wechat", "model-selection.json"),
-      allowlist,
+      { strategy: "codex-family", allowlist },
     ),
   };
+}
+
+export type AcpBackend = "codex" | "claude" | "unsupported";
+
+export function classifyAcpBackend(
+  command: string,
+  args: string[] = [],
+): AcpBackend {
+  const executable = path.basename(command).toLowerCase();
+  const classifyPackage = (value: string | undefined): AcpBackend => {
+    const normalized = value?.toLowerCase();
+    if (
+      normalized === "codex-acp"
+      || normalized === "@agentclientprotocol/codex-acp"
+    ) return "codex";
+    if (
+      normalized === "claude-agent-acp"
+      || normalized === "@agentclientprotocol/claude-agent-acp"
+    ) return "claude";
+    return "unsupported";
+  };
+  if (executable === "codex-acp" || executable === "codex-acp.cmd") {
+    return "codex";
+  }
+  if (
+    executable === "claude-agent-acp"
+    || executable === "claude-agent-acp.cmd"
+  ) {
+    return "claude";
+  }
+  if (["npx", "pnpx", "bunx"].includes(executable)) {
+    const backendArg = args.find((arg) => arg !== "--" && !arg.startsWith("-"));
+    return classifyPackage(backendArg);
+  }
+  if (executable === "pnpm") {
+    const [subcommand, backendArg] = args;
+    return subcommand === "dlx" || subcommand === "exec"
+      ? classifyPackage(backendArg)
+      : "unsupported";
+  }
+  if (executable === "yarn") {
+    const [subcommand, backendArg] = args;
+    return subcommand === "dlx"
+      ? classifyPackage(backendArg)
+      : "unsupported";
+  }
+  return "unsupported";
 }
 
 export function isCodexAcpBackend(
   command: string,
   args: string[] = [],
 ): boolean {
-  const executable = path.basename(command).toLowerCase();
-  const isCodexPackage = (value: string | undefined): boolean => {
-    const normalized = value?.toLowerCase();
-    return normalized === "codex-acp"
-      || normalized === "@agentclientprotocol/codex-acp";
-  };
-  if (executable === "codex-acp" || executable === "codex-acp.cmd") {
-    return true;
-  }
-  if (["npx", "pnpx", "bunx"].includes(executable)) {
-    const backendArg = args.find((arg) => arg !== "--" && !arg.startsWith("-"));
-    return isCodexPackage(backendArg);
-  }
-  if (executable === "pnpm") {
-    const [subcommand, backendArg] = args;
-    return (subcommand === "dlx" || subcommand === "exec")
-      && isCodexPackage(backendArg);
-  }
-  if (executable === "yarn") {
-    const [subcommand, backendArg] = args;
-    return subcommand === "dlx" && isCodexPackage(backendArg);
-  }
-  return false;
+  return classifyAcpBackend(command, args) === "codex";
 }
 
 export function createBackendModelSelectionConfig(
@@ -113,23 +150,49 @@ export function createBackendModelSelectionConfig(
   createConfig: (source: NodeJS.ProcessEnv) => ModelSelectionConfig | null
     = createModelSelectionConfig,
 ): ModelSelectionConfig | null {
-  return isCodexAcpBackend(command, args)
-    ? createConfig(env)
-    : null;
+  const backend = classifyAcpBackend(command, args);
+  if (backend === "codex") return createConfig(env);
+  if (backend !== "claude") return null;
+
+  const agentHome = env.WEIXIN_AGENT_HOME?.trim();
+  if (!agentHome) {
+    throw new Error("WEIXIN_AGENT_HOME is required for model selection");
+  }
+  if (!path.isAbsolute(agentHome)) {
+    throw new Error("WEIXIN_AGENT_HOME must be absolute for model selection");
+  }
+  return {
+    strategy: "acp-advertised",
+    store: new ModelSelectionStore(
+      path.join(agentHome, "channels", "wechat", "model-selection.json"),
+      { strategy: "acp-advertised" },
+    ),
+  };
 }
 
+type StorePolicy =
+  | { strategy: "codex-family"; allowlist: string[] }
+  | { strategy: "acp-advertised" };
+
 export class ModelSelectionStore {
-  private readonly allowed: Set<string>;
+  private readonly allowed: Set<string> | null;
+  private readonly strategy: StorePolicy["strategy"];
 
   constructor(
     readonly filePath: string,
-    allowlist: string[],
+    policy: string[] | StorePolicy,
   ) {
     if (!path.isAbsolute(filePath)) {
       throw new Error("model selection state path must be absolute");
     }
-    this.allowed = new Set(allowlist.map(validateModelFamily));
-    if (this.allowed.size === 0) {
+    const normalizedPolicy: StorePolicy = Array.isArray(policy)
+      ? { strategy: "codex-family", allowlist: policy }
+      : policy;
+    this.strategy = normalizedPolicy.strategy;
+    this.allowed = normalizedPolicy.strategy === "codex-family"
+      ? new Set(normalizedPolicy.allowlist.map(validateModelFamily))
+      : null;
+    if (this.allowed?.size === 0) {
       throw new Error("model selection allowlist must not be empty");
     }
   }
@@ -175,18 +238,11 @@ export class ModelSelectionStore {
     ) {
       throw new Error("model selection state schema is invalid");
     }
-    const concrete = parseConcreteModelId(parsed.modelId);
-    if (!this.allowed.has(concrete.family)) {
-      throw new Error(`persisted model is not in the allowlist: ${concrete.family}`);
-    }
-    return concrete.modelId;
+    return this.validatePersistedModelId(parsed.modelId);
   }
 
   write(modelId: string): void {
-    const concrete = parseConcreteModelId(modelId);
-    if (!this.allowed.has(concrete.family)) {
-      throw new Error(`model is not in the allowlist: ${concrete.family}`);
-    }
+    const validatedModelId = this.validatePersistedModelId(modelId);
 
     const parent = path.dirname(this.filePath);
     fs.mkdirSync(parent, { recursive: true, mode: 0o700 });
@@ -198,7 +254,7 @@ export class ModelSelectionStore {
 
     const state: ModelSelectionState = {
       version: 1,
-      modelId: concrete.modelId,
+      modelId: validatedModelId,
       updatedAt: new Date().toISOString(),
     };
     const bytes = `${JSON.stringify(state, null, 2)}\n`;
@@ -229,6 +285,54 @@ export class ModelSelectionStore {
         if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
       }
     }
+  }
+
+  clear(): void {
+    let initialStat: fs.Stats;
+    try {
+      initialStat = fs.lstatSync(this.filePath);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw err;
+    }
+    this.assertSafeStateFile(initialStat);
+    const fd = fs.openSync(
+      this.filePath,
+      fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0),
+    );
+    try {
+      const openedStat = fs.fstatSync(fd);
+      this.assertSafeStateFile(openedStat);
+      if (
+        openedStat.dev !== initialStat.dev
+        || openedStat.ino !== initialStat.ino
+      ) {
+        throw new Error("model selection state changed while opening");
+      }
+    } finally {
+      fs.closeSync(fd);
+    }
+    fs.unlinkSync(this.filePath);
+    const dirFd = fs.openSync(path.dirname(this.filePath), "r");
+    try {
+      fs.fsyncSync(dirFd);
+    } finally {
+      fs.closeSync(dirFd);
+    }
+  }
+
+  private validatePersistedModelId(modelId: string): string {
+    if (this.strategy === "acp-advertised") {
+      if (!ACP_MODEL_ID_PATTERN.test(modelId)) {
+        throw new Error(`invalid ACP model id: ${JSON.stringify(modelId)}`);
+      }
+      return modelId;
+    }
+    const concrete = parseConcreteModelId(modelId);
+    if (!this.allowed?.has(concrete.family)) {
+      throw new Error(`model is not in the allowlist: ${concrete.family}`);
+    }
+    return concrete.modelId;
   }
 
   private assertSafeStateFile(stat: fs.Stats): void {
