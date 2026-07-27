@@ -11,7 +11,11 @@ const menu: AgentModelMenu = {
   currentModelId: "gpt-5.6-sol",
   options: [
     { id: "gpt-5.6-sol", name: "Sol" },
-    { id: "gpt-5.6-terra", name: "Terra" },
+    {
+      id: "gpt-5.6-terra",
+      name: "Terra",
+      description: "Terra 5.6 · Best for version-sensitive work",
+    },
     { id: "gpt-5.6-luna", name: "Luna" },
   ],
 };
@@ -53,6 +57,7 @@ async function testMenuAndNumericFollowup(): Promise<void> {
   );
   assert.match(replies[0] ?? "", /1\. Sol（当前）/);
   assert.match(replies[0] ?? "", /2\. Terra/);
+  assert.match(replies[0] ?? "", /Terra 5\.6 · Best for version-sensitive work/);
 
   assert.deepEqual(
     await handleSlashCommand("先问个别的问题", ctx, Date.now(), undefined, registry),

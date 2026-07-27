@@ -134,9 +134,12 @@ async function handleEcho(
 }
 
 function formatModelMenu(menu: AgentModelMenu): string {
-  const lines = menu.options.map((option, index) => {
+  const lines = menu.options.flatMap((option, index) => {
     const current = option.id === menu.currentModelId ? "（当前）" : "";
-    return `${index + 1}. ${option.name}${current}`;
+    const title = `${index + 1}. ${option.name}${current}`;
+    return option.description
+      ? [title, `   ${option.description}`]
+      : [title];
   });
   return [
     menu.currentModelId ? `当前模型：${menu.currentModelId}` : "当前模型：由 Agent 默认配置决定",
