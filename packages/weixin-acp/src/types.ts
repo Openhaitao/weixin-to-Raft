@@ -1,5 +1,14 @@
 import type { ModelSelectionConfig } from "./model-selection.js";
 
+export interface SessionModelState {
+  currentModelId: string;
+  availableModels: Array<{
+    modelId: string;
+    name: string;
+    description?: string | null;
+  }>;
+}
+
 export type AcpAgentOptions = {
   /** Command to launch the ACP agent, e.g. "npx" */
   command: string;

@@ -26,7 +26,7 @@ function describeToolCall(update: {
 
 export type AcpClient = Pick<
   ClientSideConnection,
-  "newSession" | "prompt" | "unstable_setSessionModel"
+  "newSession" | "prompt" | "setSessionConfigOption"
 >;
 
 export interface AcpConnectionLike {
@@ -143,7 +143,11 @@ export class AcpConnection implements AcpConnectionLike {
 
   async setSessionModel(sessionId: SessionId, modelId: string): Promise<void> {
     const connection = await this.ensureReady();
-    await connection.unstable_setSessionModel({ sessionId, modelId });
+    await connection.setSessionConfigOption({
+      sessionId,
+      configId: "model",
+      value: modelId,
+    });
   }
 
   /**

@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import type { SessionId, SessionModelState } from "@agentclientprotocol/sdk";
+import type { SessionId } from "@agentclientprotocol/sdk";
 
 import { AcpAgent } from "./acp-agent.js";
 import type { AcpClient, AcpConnectionLike } from "./acp-connection.js";
@@ -12,6 +12,7 @@ import {
   ModelSelectionStore,
 } from "./model-selection.js";
 import { ResponseCollector } from "./response-collector.js";
+import type { SessionModelState } from "./types.js";
 
 const allowlist = ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"];
 const advertisedModels: SessionModelState = {
@@ -42,10 +43,18 @@ class FakeAcpConnection implements AcpConnectionLike {
       this.events.push(`new:${sessionId}`);
       return {
         sessionId,
-        models: {
-          ...this.models,
-          availableModels: this.models.availableModels.map((model) => ({ ...model })),
-        },
+        configOptions: [{
+          id: "model",
+          name: "Model",
+          category: "model",
+          type: "select",
+          currentValue: this.models.currentModelId,
+          options: this.models.availableModels.map((model) => ({
+            value: model.modelId,
+            name: model.name,
+            description: model.description,
+          })),
+        }],
       };
     },
     prompt: async ({ sessionId, prompt }) => {
@@ -65,9 +74,11 @@ class FakeAcpConnection implements AcpConnectionLike {
       });
       return { stopReason: "end_turn" };
     },
-    unstable_setSessionModel: async ({ sessionId, modelId }) => {
-      await this.setSessionModel(sessionId, modelId);
-      return {};
+    setSessionConfigOption: async ({ sessionId, configId, value }) => {
+      assert.equal(configId, "model");
+      assert.equal(typeof value, "string");
+      await this.setSessionModel(sessionId, String(value));
+      return { configOptions: [] };
     },
   };
 
@@ -202,6 +213,80 @@ try {
       },
     ],
   };
+  const requiredHome = path.join(root, "required-claude-bot");
+  const requiredStatePath = path.join(
+    requiredHome,
+    "channels",
+    "wechat",
+    "model-selection.json",
+  );
+  const requiredConnection = new FakeAcpConnection(claudeModels);
+  const requiredAgent = new AcpAgent(
+    {
+      command: "claude-agent-acp",
+      modelSelection: createBackendModelSelectionConfig(
+        "claude-agent-acp",
+        [],
+        {
+          WEIXIN_AGENT_HOME: requiredHome,
+          WEIXIN_AGENT_REQUIRED_DEFAULT_MODEL: "claude-opus-fixture",
+          WEIXIN_AGENT_REQUIRED_DEFAULT_MODEL_DESCRIPTION_PREFIX: "large fixture",
+        },
+      ),
+    },
+    () => requiredConnection,
+  );
+  const requiredMenu = await requiredAgent.getModelMenu!("required-default");
+  assert.equal(requiredMenu.currentModelId, "claude-opus-fixture");
+  assert.deepEqual(requiredConnection.events, [
+    "ready",
+    "new:session-1",
+    "set:session-1:claude-opus-fixture",
+  ]);
+  assert.equal(
+    JSON.parse(fs.readFileSync(requiredStatePath, "utf8")).modelId,
+    "claude-opus-fixture",
+  );
+
+  const missingRequiredAgent = new AcpAgent(
+    {
+      command: "claude-agent-acp",
+      modelSelection: createBackendModelSelectionConfig(
+        "claude-agent-acp",
+        [],
+        {
+          WEIXIN_AGENT_HOME: path.join(root, "missing-required-claude-bot"),
+          WEIXIN_AGENT_REQUIRED_DEFAULT_MODEL: "claude-opus-5",
+        },
+      ),
+    },
+    () => new FakeAcpConnection(claudeModels),
+  );
+  await assert.rejects(
+    () => missingRequiredAgent.getModelMenu!("missing-required-default"),
+    /required default model is unavailable.*claude-opus-5/,
+  );
+
+  const mismatchedDescriptionAgent = new AcpAgent(
+    {
+      command: "claude-agent-acp",
+      modelSelection: createBackendModelSelectionConfig(
+        "claude-agent-acp",
+        [],
+        {
+          WEIXIN_AGENT_HOME: path.join(root, "mismatched-description-claude-bot"),
+          WEIXIN_AGENT_REQUIRED_DEFAULT_MODEL: "claude-opus-fixture",
+          WEIXIN_AGENT_REQUIRED_DEFAULT_MODEL_DESCRIPTION_PREFIX: "Opus 5",
+        },
+      ),
+    },
+    () => new FakeAcpConnection(claudeModels),
+  );
+  await assert.rejects(
+    () => mismatchedDescriptionAgent.getModelMenu!("mismatched-description"),
+    /model claude-opus-fixture is described as "large fixture"; expected prefix "Opus 5"/,
+  );
+
   const claudeConnection = new FakeAcpConnection(claudeModels);
   let codexConfigFactoryCalls = 0;
   const claudeAgent = new AcpAgent(
@@ -289,6 +374,40 @@ try {
     "new:session-1",
     "set:session-1:claude-opus-fixture",
     "prompt:session-1",
+  ]);
+
+  const retiredSelectionHome = path.join(root, "retired-selection-claude-bot");
+  const retiredSelectionStore = new ModelSelectionStore(
+    path.join(
+      retiredSelectionHome,
+      "channels",
+      "wechat",
+      "model-selection.json",
+    ),
+    { strategy: "acp-advertised" },
+  );
+  retiredSelectionStore.write("claude-retired-fixture");
+  const retiredSelectionConnection = new FakeAcpConnection(claudeModels);
+  const retiredSelectionAgent = new AcpAgent(
+    {
+      command: "claude-agent-acp",
+      modelSelection: {
+        strategy: "acp-advertised",
+        requiredDefaultModel: "claude-opus-fixture",
+        store: retiredSelectionStore,
+      },
+    },
+    () => retiredSelectionConnection,
+  );
+  const retiredSelectionMenu = await retiredSelectionAgent.getModelMenu!(
+    "retired-selection-claude",
+  );
+  assert.equal(retiredSelectionMenu.currentModelId, "claude-opus-fixture");
+  assert.equal(retiredSelectionStore.read(), "claude-opus-fixture");
+  assert.deepEqual(retiredSelectionConnection.events, [
+    "ready",
+    "new:session-1",
+    "set:session-1:claude-opus-fixture",
   ]);
 
   const staleModels: SessionModelState = {

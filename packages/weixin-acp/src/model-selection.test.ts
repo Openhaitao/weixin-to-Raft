@@ -93,12 +93,54 @@ try {
       },
   );
   assert.equal(claudeConfig?.strategy, "acp-advertised");
+  if (claudeConfig?.strategy === "acp-advertised") {
+    assert.equal(claudeConfig.requiredDefaultModel, undefined);
+  }
   assert.equal(codexConfigFactoryCalls, 0);
   assert.equal(
     claudeConfig?.store.filePath,
     path.join(root, "channels", "wechat", "model-selection.json"),
   );
   assert.ok(createBackendModelSelectionConfig("codex-acp", [], backendEnv));
+  const requiredClaudeConfig = createBackendModelSelectionConfig(
+    "claude-agent-acp",
+    [],
+    {
+      ...backendEnv,
+      WEIXIN_AGENT_REQUIRED_DEFAULT_MODEL: "opus",
+      WEIXIN_AGENT_REQUIRED_DEFAULT_MODEL_DESCRIPTION_PREFIX: "Opus 5",
+    },
+  );
+  assert.equal(requiredClaudeConfig?.strategy, "acp-advertised");
+  if (requiredClaudeConfig?.strategy === "acp-advertised") {
+    assert.equal(requiredClaudeConfig.requiredDefaultModel, "opus");
+    assert.equal(
+      requiredClaudeConfig.requiredDefaultModelDescriptionPrefix,
+      "Opus 5",
+    );
+  }
+  assert.throws(
+    () => createBackendModelSelectionConfig(
+      "claude-agent-acp",
+      [],
+      {
+        ...backendEnv,
+        WEIXIN_AGENT_REQUIRED_DEFAULT_MODEL: "bad model",
+      },
+    ),
+    /REQUIRED_DEFAULT_MODEL is invalid/,
+  );
+  assert.throws(
+    () => createBackendModelSelectionConfig(
+      "claude-agent-acp",
+      [],
+      {
+        ...backendEnv,
+        WEIXIN_AGENT_REQUIRED_DEFAULT_MODEL_DESCRIPTION_PREFIX: "Opus 5",
+      },
+    ),
+    /REQUIRED_DEFAULT_MODEL is required/,
+  );
 
   const botA = new ModelSelectionStore(
     path.join(root, "bot-a", "channels", "wechat", "model-selection.json"),
