@@ -133,22 +133,44 @@ async function handleEcho(
   await sendReply(ctx, timing);
 }
 
+// Display-only Chinese blurbs for known model ids. Unknown/new models fall
+// back to the advertised description so the menu never loses an entry —
+// the option list itself always comes from the runtime ACP handshake.
+const MODEL_BLURBS: Record<string, string> = {
+  sonnet: "日常任务，快速高效",
+  opus: "复杂任务首选",
+  fable: "最强能力，适合最难最长的任务（耗用量大）",
+  haiku: "最快响应，适合简单问题",
+};
+
+/** Full display name, e.g. "Opus 5": the description's first ·-segment
+ * carries family+version; fall back to the advertised name, then the id. */
+function modelDisplayName(option: AgentModelMenu["options"][number]): string {
+  const versioned = option.description?.split("·")[0]?.trim();
+  return versioned || option.name || option.id;
+}
+
 function formatModelMenu(menu: AgentModelMenu): string {
-  const lines = menu.options.flatMap((option, index) => {
-    const current = option.id === menu.currentModelId ? "（当前）" : "";
-    const title = `${index + 1}. ${option.name}${current}`;
-    return option.description
-      ? [title, `   ${option.description}`]
-      : [title];
+  const current = menu.options.find(
+    (option) => option.id === menu.currentModelId,
+  );
+  const lines = menu.options.map((option, index) => {
+    const isCurrent = option.id === menu.currentModelId;
+    const blurb = MODEL_BLURBS[option.id]
+      ?? MODEL_BLURBS[option.name?.toLowerCase() ?? ""]
+      ?? option.description
+      ?? "";
+    return `${index + 1}. ${option.name}${isCurrent ? " ✓" : ""}`
+      + `${blurb ? ` — ${blurb}` : ""}${isCurrent ? "（当前）" : ""}`;
   });
   return [
-    menu.currentModelId
-      ? `当前模型：${menu.options.find((option) => option.id === menu.currentModelId)?.name ?? menu.currentModelId}`
+    current
+      ? `当前模型：${modelDisplayName(current)}`
       : "当前模型：由 Agent 默认配置决定",
     "",
     ...lines,
     "",
-    "请在 5 分钟内直接回复编号切换。切换后下一条消息生效。",
+    "回复编号即可切换，5 分钟内有效。",
   ].join("\n");
 }
 

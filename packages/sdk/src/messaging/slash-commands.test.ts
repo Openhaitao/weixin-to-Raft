@@ -55,9 +55,11 @@ async function testMenuAndNumericFollowup(): Promise<void> {
     await handleSlashCommand("/model", ctx, Date.now(), undefined, registry),
     { handled: true },
   );
-  assert.match(replies[0] ?? "", /1\. Sol（当前）/);
-  assert.match(replies[0] ?? "", /2\. Terra/);
-  assert.match(replies[0] ?? "", /Terra 5\.6 · Best for version-sensitive work/);
+  // New one-line style: "1. Sol ✓ — <blurb>（当前）"; unknown ids fall back
+  // to the advertised description as the blurb.
+  assert.match(replies[0] ?? "", /1\. Sol ✓.*（当前）/);
+  assert.match(replies[0] ?? "", /2\. Terra — Terra 5\.6 · Best for version-sensitive work/);
+  assert.match(replies[0] ?? "", /回复编号即可切换，5 分钟内有效。/);
 
   assert.deepEqual(
     await handleSlashCommand("先问个别的问题", ctx, Date.now(), undefined, registry),
