@@ -36,6 +36,9 @@ assert.deepEqual(
   ),
   { PATH: "/usr/bin:/bin", CTI_DEFAULT_MODEL: "codex-deep" },
 );
+// [task16] claude-prefixed CTI_DEFAULT_MODEL must NOT re-inject
+// ANTHROPIC_MODEL any more: model routing goes through the ACP protocol,
+// and the env injection bypassed the required-default gate.
 assert.deepEqual(
   buildAgentEnv(
     { PATH: "/usr/bin:/bin", ANTHROPIC_MODEL: "ambient-wrong" },
@@ -44,8 +47,37 @@ assert.deepEqual(
   {
     PATH: "/usr/bin:/bin",
     CTI_DEFAULT_MODEL: "  claude-opus-4-8  ",
-    ANTHROPIC_MODEL: "claude-opus-4-8",
   },
+);
+// [task16] Gate variables are protected fields: launcher (ambient) wins,
+// config cannot override, widen, or inject them.
+assert.deepEqual(
+  buildAgentEnv(
+    {
+      PATH: "/usr/bin:/bin",
+      WEIXIN_AGENT_REQUIRED_DEFAULT_MODEL: "opus",
+      WEIXIN_AGENT_REQUIRED_DEFAULT_MODEL_DESCRIPTION_PREFIX: "Opus 5",
+    },
+    {
+      CTI_DEFAULT_MODEL: "claude-opus-4-6",
+      WEIXIN_AGENT_REQUIRED_DEFAULT_MODEL: "sonnet",
+      WEIXIN_AGENT_REQUIRED_DEFAULT_MODEL_DESCRIPTION_PREFIX: "Sonnet",
+    },
+  ),
+  {
+    PATH: "/usr/bin:/bin",
+    CTI_DEFAULT_MODEL: "claude-opus-4-6",
+    WEIXIN_AGENT_REQUIRED_DEFAULT_MODEL: "opus",
+    WEIXIN_AGENT_REQUIRED_DEFAULT_MODEL_DESCRIPTION_PREFIX: "Opus 5",
+  },
+);
+// Config must not be able to conjure a gate the launcher did not set.
+assert.deepEqual(
+  buildAgentEnv(
+    { PATH: "/usr/bin:/bin" },
+    { WEIXIN_AGENT_REQUIRED_DEFAULT_MODEL: "haiku" },
+  ),
+  { PATH: "/usr/bin:/bin" },
 );
 assert.equal(
   buildBotPath("/Users/test/.linearos/agents/bot", "/opt/local/bin:/usr/bin", ":"),
