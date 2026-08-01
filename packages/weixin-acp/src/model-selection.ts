@@ -24,6 +24,8 @@ export interface CodexModelSelectionConfig {
 export interface AcpAdvertisedModelSelectionConfig {
   strategy: "acp-advertised";
   store: ModelSelectionStore;
+  requiredDefaultModel?: string;
+  requiredDefaultModelDescriptionPrefix?: string;
 }
 
 export type ModelSelectionConfig =
@@ -161,8 +163,33 @@ export function createBackendModelSelectionConfig(
   if (!path.isAbsolute(agentHome)) {
     throw new Error("WEIXIN_AGENT_HOME must be absolute for model selection");
   }
+  const requiredDefaultModel = env.WEIXIN_AGENT_REQUIRED_DEFAULT_MODEL?.trim();
+  if (requiredDefaultModel && !ACP_MODEL_ID_PATTERN.test(requiredDefaultModel)) {
+    throw new Error("WEIXIN_AGENT_REQUIRED_DEFAULT_MODEL is invalid");
+  }
+  const requiredDefaultModelDescriptionPrefix =
+    env.WEIXIN_AGENT_REQUIRED_DEFAULT_MODEL_DESCRIPTION_PREFIX?.trim();
+  if (requiredDefaultModelDescriptionPrefix && !requiredDefaultModel) {
+    throw new Error(
+      "WEIXIN_AGENT_REQUIRED_DEFAULT_MODEL is required when validating its description",
+    );
+  }
+  if (
+    requiredDefaultModelDescriptionPrefix
+    && (
+      requiredDefaultModelDescriptionPrefix.length > 128
+      || /[\u0000-\u001f\u007f]/.test(requiredDefaultModelDescriptionPrefix)
+    )
+  ) {
+    throw new Error(
+      "WEIXIN_AGENT_REQUIRED_DEFAULT_MODEL_DESCRIPTION_PREFIX is invalid",
+    );
+  }
   return {
     strategy: "acp-advertised",
+    requiredDefaultModel: requiredDefaultModel || undefined,
+    requiredDefaultModelDescriptionPrefix:
+      requiredDefaultModelDescriptionPrefix || undefined,
     store: new ModelSelectionStore(
       path.join(agentHome, "channels", "wechat", "model-selection.json"),
       { strategy: "acp-advertised" },

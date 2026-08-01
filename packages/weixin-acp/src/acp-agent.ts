@@ -5,10 +5,10 @@ import type {
   ChatRequest,
   ChatResponse,
 } from "weixin-agent-sdk";
-import type { SessionId, SessionModelState } from "@agentclientprotocol/sdk";
+import type { NewSessionResponse, SessionId } from "@agentclientprotocol/sdk";
 import path from "node:path";
 
-import type { AcpAgentOptions } from "./types.js";
+import type { AcpAgentOptions, SessionModelState } from "./types.js";
 import {
   AcpConnection,
   type AcpClient,
@@ -28,6 +28,26 @@ function log(msg: string) {
 
 const STALE_MODEL_NOTICE =
   "你之前选的型号已不可用，已回到默认型号；可发 /model 重新选择。";
+
+export function sessionModelsFromConfigOptions(
+  response: Pick<NewSessionResponse, "configOptions">,
+): SessionModelState | null {
+  const model = response.configOptions?.find((option) =>
+    option.type === "select" && (option.category === "model" || option.id === "model")
+  );
+  if (!model || model.type !== "select") return null;
+  const options = model.options.flatMap((option) =>
+    "options" in option ? option.options : [option]
+  );
+  return {
+    currentModelId: String(model.currentValue),
+    availableModels: options.map((option) => ({
+      modelId: String(option.value),
+      name: option.name,
+      description: option.description,
+    })),
+  };
+}
 
 function isEmptyUserContentError(err: unknown): boolean {
   const message = err instanceof Error ? err.message : String(err);
@@ -266,25 +286,75 @@ export class AcpAgent implements Agent {
     }
     log(`session created: ${res.sessionId}`);
     this.sessions.set(conversationId, res.sessionId);
-    this.sessionModels.set(conversationId, res.models ?? null);
+    const sessionModels = sessionModelsFromConfigOptions(res);
+    this.sessionModels.set(conversationId, sessionModels);
 
-    const persistedModelId = this.options.modelSelection?.store.read();
+    const selectionConfig = this.options.modelSelection;
+    const requiredDefaultModel = selectionConfig?.strategy === "acp-advertised"
+      ? selectionConfig.requiredDefaultModel
+      : undefined;
+    const requiredDefaultOption = requiredDefaultModel
+      ? sessionModels?.availableModels.find(
+        (model) => model.modelId === requiredDefaultModel,
+      )
+      : undefined;
+    const requiredDescriptionPrefix = selectionConfig?.strategy === "acp-advertised"
+      ? selectionConfig.requiredDefaultModelDescriptionPrefix
+      : undefined;
+    if (requiredDefaultModel && !requiredDefaultOption) {
+      this.resetAcpRuntime();
+      throw new Error(
+        `required default model is unavailable from the candidate ACP: ${requiredDefaultModel}`,
+      );
+    }
+    if (
+      requiredDescriptionPrefix
+      && !requiredDefaultOption?.description?.startsWith(requiredDescriptionPrefix)
+    ) {
+      this.resetAcpRuntime();
+      throw new Error(
+        `candidate ACP model ${requiredDefaultModel} is described as `
+        + `${JSON.stringify(requiredDefaultOption?.description ?? "(missing)")}; `
+        + `expected prefix ${JSON.stringify(requiredDescriptionPrefix)}`,
+      );
+    }
+
+    const persistedModelId = selectionConfig?.store.read();
     if (persistedModelId) {
-      const config = this.options.modelSelection!;
+      const config = selectionConfig!;
       if (
         config.strategy === "acp-advertised"
-        && !this.isModelAvailable(res.models, persistedModelId)
+        && !this.isModelAvailable(sessionModels, persistedModelId)
       ) {
-        log(
-          `WARNING persisted model unavailable; falling back to ACP default`
-          + ` conversation=${conversationId} persisted=${persistedModelId}`
-          + ` default=${res.models?.currentModelId ?? "unknown"}`,
-        );
-        config.store.clear();
+        if (requiredDefaultModel) {
+          try {
+            await this.connection.setSessionModel(res.sessionId, requiredDefaultModel);
+            config.store.write(requiredDefaultModel);
+            this.sessionModels.set(
+              conversationId,
+              this.withCurrentModel(sessionModels, requiredDefaultModel),
+            );
+            log(
+              `WARNING persisted model unavailable; selected required default`
+              + ` conversation=${conversationId} persisted=${persistedModelId}`
+              + ` default=${requiredDefaultModel}`,
+            );
+          } catch (err) {
+            this.resetAcpRuntime();
+            throw err;
+          }
+        } else {
+          log(
+            `WARNING persisted model unavailable; falling back to ACP default`
+            + ` conversation=${conversationId} persisted=${persistedModelId}`
+            + ` default=${sessionModels?.currentModelId ?? "unknown"}`,
+          );
+          config.store.clear();
+        }
         this.staleModelNotices.add(conversationId);
       } else {
         try {
-          if (!this.isModelAvailable(res.models, persistedModelId)) {
+          if (!this.isModelAvailable(sessionModels, persistedModelId)) {
             throw new Error(
               `persisted model is unavailable from the candidate ACP: ${persistedModelId}`,
             );
@@ -292,13 +362,26 @@ export class AcpAgent implements Agent {
           await this.connection.setSessionModel(res.sessionId, persistedModelId);
           this.sessionModels.set(
             conversationId,
-            this.withCurrentModel(res.models, persistedModelId),
+            this.withCurrentModel(sessionModels, persistedModelId),
           );
           log(`restored model selection: ${persistedModelId}`);
         } catch (err) {
           this.resetAcpRuntime();
           throw err;
         }
+      }
+    } else if (requiredDefaultModel) {
+      try {
+        await this.connection.setSessionModel(res.sessionId, requiredDefaultModel);
+        selectionConfig!.store.write(requiredDefaultModel);
+        this.sessionModels.set(
+          conversationId,
+          this.withCurrentModel(sessionModels, requiredDefaultModel),
+        );
+        log(`selected required default model: ${requiredDefaultModel}`);
+      } catch (err) {
+        this.resetAcpRuntime();
+        throw err;
       }
     }
     return res.sessionId;
