@@ -142,7 +142,9 @@ function formatModelMenu(menu: AgentModelMenu): string {
       : [title];
   });
   return [
-    menu.currentModelId ? `当前模型：${menu.currentModelId}` : "当前模型：由 Agent 默认配置决定",
+    menu.currentModelId
+      ? `当前模型：${menu.options.find((option) => option.id === menu.currentModelId)?.name ?? menu.currentModelId}`
+      : "当前模型：由 Agent 默认配置决定",
     "",
     ...lines,
     "",

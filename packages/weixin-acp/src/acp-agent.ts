@@ -447,11 +447,19 @@ export class AcpAgent implements Agent {
     const config = this.options.modelSelection;
     if (!state) return [];
     if (config?.strategy === "acp-advertised") {
-      return state.availableModels.map((model) => ({
-        id: model.modelId,
-        name: model.name,
-        description: model.description ?? undefined,
-      }));
+      // The upstream "default" entry is an alias for whatever the vendor
+      // recommends (currently Sonnet). Once a required default is enforced,
+      // that recommendation contradicts fleet policy and only confuses the
+      // menu, so the alias is hidden; concrete models are never filtered.
+      const required = config.requiredDefaultModel;
+      return state.availableModels
+        .filter((model) =>
+          !(required && required !== "default" && model.modelId === "default"))
+        .map((model) => ({
+          id: model.modelId,
+          name: model.name,
+          description: model.description ?? undefined,
+        }));
     }
     const allowlist = config?.strategy === "codex-family"
       ? config.allowlist

@@ -202,6 +202,11 @@ try {
     currentModelId: "claude-sonnet-fixture",
     availableModels: [
       {
+        modelId: "default",
+        name: "Default (recommended)",
+        description: "vendor recommendation alias",
+      },
+      {
         modelId: "claude-sonnet-fixture",
         name: "Sonnet Fixture",
         description: "default fixture",
@@ -238,6 +243,12 @@ try {
   );
   const requiredMenu = await requiredAgent.getModelMenu!("required-default");
   assert.equal(requiredMenu.currentModelId, "claude-opus-fixture");
+  // The vendor "default" alias contradicts the enforced fleet default and
+  // must be hidden; concrete models must all survive.
+  assert.deepEqual(
+    requiredMenu.options.map((option) => option.id),
+    ["claude-sonnet-fixture", "claude-opus-fixture"],
+  );
   assert.deepEqual(requiredConnection.events, [
     "ready",
     "new:session-1",
@@ -316,6 +327,13 @@ try {
   assert.deepEqual(
     claudeMenu.options,
     [
+      // Without an enforced required default the vendor alias passes
+      // through untouched — only the required-default path hides it.
+      {
+        id: "default",
+        name: "Default (recommended)",
+        description: "vendor recommendation alias",
+      },
       {
         id: "claude-sonnet-fixture",
         name: "Sonnet Fixture",
@@ -412,7 +430,11 @@ try {
 
   const staleModels: SessionModelState = {
     currentModelId: "claude-sonnet-fixture",
-    availableModels: [claudeModels.availableModels[0]],
+    availableModels: [
+      claudeModels.availableModels.find(
+        (model) => model.modelId === "claude-sonnet-fixture",
+      )!,
+    ],
   };
   const staleConnection = new FakeAcpConnection(staleModels);
   const staleAgent = new AcpAgent(
