@@ -33,8 +33,13 @@ export async function downloadMediaFromItem(
     errLog: (msg: string) => void;
     label: string;
   },
+  /** Bytes still available for THIS message across all its attachments. */
+  budgetBytes: number = WEIXIN_MEDIA_MAX_BYTES,
 ): Promise<WeixinInboundMediaOpts> {
   const { cdnBaseUrl, saveMedia, log, errLog, label } = deps;
+  // Never read more than the smaller of the per-file cap and what is left of
+  // this message's total budget.
+  const effectiveMax = Math.max(0, Math.min(WEIXIN_MEDIA_MAX_BYTES, budgetBytes));
   const result: WeixinInboundMediaOpts = {};
 
   if (item.type === MessageItemType.IMAGE) {
@@ -54,12 +59,14 @@ export async function downloadMediaFromItem(
             cdnBaseUrl,
             `${label} image`,
             img.media.full_url,
+            effectiveMax,
           )
         : await downloadPlainCdnBuffer(
             img.media.encrypt_query_param ?? "",
             cdnBaseUrl,
             `${label} image-plain`,
             img.media.full_url,
+            effectiveMax,
           );
       // Sniff the real type: WeChat gives no filename and no content-type, so
       // passing undefined here made every image land as `.bin` — unreadable to
@@ -72,12 +79,12 @@ export async function downloadMediaFromItem(
       // is honest and still lets the model try to open it.
       const picMime = sniffImageMime(buf);
       if (picMime) {
-        const saved = await saveMedia(buf, picMime, "inbound", WEIXIN_MEDIA_MAX_BYTES);
+        const saved = await saveMedia(buf, picMime, "inbound", effectiveMax);
         result.decryptedPicPath = saved.path;
         result.picMediaType = picMime;
         logger.debug(`${label} image saved: ${saved.path} (${picMime})`);
       } else {
-        const saved = await saveMedia(buf, undefined, "inbound", WEIXIN_MEDIA_MAX_BYTES);
+        const saved = await saveMedia(buf, undefined, "inbound", effectiveMax);
         result.decryptedFilePath = saved.path;
         result.fileMediaType = "application/octet-stream";
         logger.error(`${label} image bytes unrecognised (${buf.length}B) — delivered as generic file, not labelled as an image`);
@@ -98,16 +105,17 @@ export async function downloadMediaFromItem(
         cdnBaseUrl,
         `${label} voice`,
         voice.media.full_url,
+            effectiveMax,
       );
       logger.debug(`${label} voice: decrypted ${silkBuf.length} bytes, attempting silk transcode`);
       const wavBuf = await silkToWav(silkBuf);
       if (wavBuf) {
-        const saved = await saveMedia(wavBuf, "audio/wav", "inbound", WEIXIN_MEDIA_MAX_BYTES);
+        const saved = await saveMedia(wavBuf, "audio/wav", "inbound", effectiveMax);
         result.decryptedVoicePath = saved.path;
         result.voiceMediaType = "audio/wav";
         logger.debug(`${label} voice: saved WAV to ${saved.path}`);
       } else {
-        const saved = await saveMedia(silkBuf, "audio/silk", "inbound", WEIXIN_MEDIA_MAX_BYTES);
+        const saved = await saveMedia(silkBuf, "audio/silk", "inbound", effectiveMax);
         result.decryptedVoicePath = saved.path;
         result.voiceMediaType = "audio/silk";
         logger.debug(`${label} voice: silk transcode unavailable, saved raw SILK to ${saved.path}`);
@@ -127,13 +135,14 @@ export async function downloadMediaFromItem(
         cdnBaseUrl,
         `${label} file`,
         fileItem.media.full_url,
+            effectiveMax,
       );
       const mime = getMimeFromFilename(fileItem.file_name ?? "file.bin");
       const saved = await saveMedia(
         buf,
         mime,
         "inbound",
-        WEIXIN_MEDIA_MAX_BYTES,
+        effectiveMax,
         fileItem.file_name ?? undefined,
       );
       result.decryptedFilePath = saved.path;
@@ -154,8 +163,9 @@ export async function downloadMediaFromItem(
         cdnBaseUrl,
         `${label} video`,
         videoItem.media.full_url,
+            effectiveMax,
       );
-      const saved = await saveMedia(buf, "video/mp4", "inbound", WEIXIN_MEDIA_MAX_BYTES);
+      const saved = await saveMedia(buf, "video/mp4", "inbound", effectiveMax);
       result.decryptedVideoPath = saved.path;
       logger.debug(`${label} video: saved to ${saved.path}`);
     } catch (err) {

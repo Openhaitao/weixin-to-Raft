@@ -3,12 +3,13 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import type { Agent, ChatRequest } from "../agent/interface.js";
+import type { Agent, ChatRequest, MediaAttachment } from "../agent/interface.js";
 import { sendTyping } from "../api/api.js";
 import type { WeixinMessage, MessageItem } from "../api/types.js";
 import { MessageItemType, TypingStatus } from "../api/types.js";
 import { downloadRemoteImageToTemp } from "../cdn/upload.js";
 import { downloadMediaFromItem } from "../media/media-download.js";
+import { MediaBudgetExceededError } from "../cdn/pic-decrypt.js";
 import { getExtensionFromMime } from "../media/mime.js";
 import { logger } from "../util/logger.js";
 
@@ -28,14 +29,31 @@ export function buildMediaSendFallbackText(responseText?: string): string {
   ].filter(Boolean).join("\n");
 }
 
+/**
+ * The last gate before disk. The streaming cap bounds CDN INPUT bytes; it does
+ * not bound what is finally written — SILK→WAV transcoding can multiply the
+ * data, so an in-budget download could still land an over-budget file and be
+ * delivered as if nothing were wrong.
+ *
+ * Exported so the regression can hit the PRODUCTION check rather than a mock
+ * that re-implements it (a test that asserts its own stub stays green when the
+ * real gate is deleted).
+ */
+export function assertWithinMediaBudget(buffer: Buffer, maxBytes?: number): void {
+  if (maxBytes != null && buffer.length > maxBytes) {
+    throw new MediaBudgetExceededError("saveMedia", maxBytes);
+  }
+}
+
 /** Save a buffer to a temporary file, returning the file path. */
-async function saveMediaBuffer(
+export async function saveMediaBuffer(
   buffer: Buffer,
   contentType?: string,
   subdir?: string,
-  _maxBytes?: number,
+  maxBytes?: number,
   originalFilename?: string,
 ): Promise<{ path: string }> {
+  assertWithinMediaBudget(buffer, maxBytes);
   const dir = path.join(MEDIA_TEMP_DIR, subdir ?? "");
   await fs.mkdir(dir, { recursive: true });
   let ext = ".bin";
@@ -74,45 +92,88 @@ function extractTextBody(itemList?: MessageItem[]): string {
 }
 
 /** Find the first downloadable media item from a message. */
-function findMediaItem(itemList?: MessageItem[]): MessageItem | undefined {
-  if (!itemList?.length) return undefined;
+/** Hard caps: without them a message with many attachments could pull an
+ * unbounded amount of data (the single-file limit alone does not bound N). */
+export const MAX_MEDIA_ITEMS = 9;
 
-  const hasDownloadableMedia = (m?: { encrypt_query_param?: string; full_url?: string }) =>
-    m?.encrypt_query_param || m?.full_url;
-
-  // Direct media: IMAGE > VIDEO > FILE > VOICE (skip voice with transcription)
-  const direct =
-    itemList.find(
-      (i) => i.type === MessageItemType.IMAGE && hasDownloadableMedia(i.image_item?.media),
-    ) ??
-    itemList.find(
-      (i) => i.type === MessageItemType.VIDEO && hasDownloadableMedia(i.video_item?.media),
-    ) ??
-    itemList.find(
-      (i) => i.type === MessageItemType.FILE && hasDownloadableMedia(i.file_item?.media),
-    ) ??
-    itemList.find(
-      (i) =>
-        i.type === MessageItemType.VOICE &&
-        hasDownloadableMedia(i.voice_item?.media) &&
-        !i.voice_item?.text,
-    );
-  if (direct) return direct;
-
-  // Quoted media: check ref_msg
-  const refItem = itemList.find(
-    (i) =>
-      i.type === MessageItemType.TEXT &&
-      i.ref_msg?.message_item &&
-      isMediaItem(i.ref_msg.message_item),
-  );
-  return refItem?.ref_msg?.message_item ?? undefined;
+function isDownloadableMediaItem(i: MessageItem): boolean {
+  const has = (m?: { encrypt_query_param?: string; full_url?: string }) =>
+    Boolean(m?.encrypt_query_param || m?.full_url);
+  if (i.type === MessageItemType.IMAGE) return has(i.image_item?.media);
+  if (i.type === MessageItemType.VIDEO) return has(i.video_item?.media);
+  if (i.type === MessageItemType.FILE) return has(i.file_item?.media);
+  // A voice note that already carries a transcript needs no download.
+  if (i.type === MessageItemType.VOICE) return has(i.voice_item?.media) && !i.voice_item?.text;
+  return false;
 }
 
 /**
- * Process a single inbound message:
- *   slash command check → download media → call agent → send reply.
+ * ALL downloadable media in this message, in their original order.
+ *
+ * Previously this returned exactly one item, chosen by a type priority
+ * (IMAGE > VIDEO > FILE > VOICE) — so a message carrying two photos, or an
+ * image plus a PDF, silently lost everything after the first.
  */
+/** Total bytes across all attachments of one message. The per-file limit does
+ * not bound N, so a many-attachment message needs its own ceiling. */
+export const MAX_TOTAL_MEDIA_BYTES = 200 * 1024 * 1024;
+
+/**
+ * Download ONE attachment and map it to a MediaAttachment. Returns null when
+ * the item yields nothing — a failure here is logged and skipped so the other
+ * attachments in the same message still reach the model.
+ */
+async function downloadOneAttachment(
+  item: MessageItem,
+  deps: ProcessMessageDeps,
+  budgetBytes: number,
+): Promise<MediaAttachment | undefined> {
+  try {
+    const d = await downloadMediaFromItem(item, {
+      cdnBaseUrl: deps.cdnBaseUrl,
+      saveMedia: saveMediaBuffer,
+      log: deps.log,
+      errLog: deps.errLog,
+      label: "inbound",
+    }, budgetBytes);
+    if (d.decryptedPicPath) {
+      // picMediaType is always set alongside an image path: the path only
+      // exists once the bytes were positively identified as an image.
+      return { type: "image", filePath: d.decryptedPicPath, mimeType: d.picMediaType ?? "application/octet-stream" };
+    }
+    if (d.decryptedVideoPath) {
+      return { type: "video", filePath: d.decryptedVideoPath, mimeType: "video/mp4" };
+    }
+    if (d.decryptedFilePath) {
+      return {
+        type: "file",
+        filePath: d.decryptedFilePath,
+        mimeType: d.fileMediaType ?? "application/octet-stream",
+        fileName: item.file_item?.file_name ?? undefined,
+      };
+    }
+    if (d.decryptedVoicePath) {
+      return { type: "audio", filePath: d.decryptedVoicePath, mimeType: d.voiceMediaType ?? "audio/wav" };
+    }
+    return undefined;
+  } catch (err) {
+    // One bad attachment must not take the rest of the message with it.
+    deps.errLog(`[weixin] attachment download failed (others preserved): ${String(err)}`);
+    return undefined;
+  }
+}
+
+export function findMediaItems(itemList?: MessageItem[]): {
+  items: MessageItem[];
+  /** How many downloadable attachments the message actually carried. Kept so a
+   * count-cap truncation can be reported instead of vanishing silently. */
+  candidateCount: number;
+} {
+  if (!itemList?.length) return { items: [], candidateCount: 0 };
+  const all = itemList.filter(isDownloadableMediaItem);
+  return { items: all.slice(0, MAX_MEDIA_ITEMS), candidateCount: all.length };
+}
+
 export async function processOneMessage(
   full: WeixinMessage,
   deps: ProcessMessageDeps,
@@ -162,54 +223,63 @@ export async function processOneMessage(
   }
 
   // --- Download media ---
-  let media: ChatRequest["media"];
-  const mediaItem = findMediaItem(full.item_list);
-  if (mediaItem) {
-    try {
-      const downloaded = await downloadMediaFromItem(mediaItem, {
-        cdnBaseUrl: deps.cdnBaseUrl,
-        saveMedia: saveMediaBuffer,
-        log: deps.log,
-        errLog: deps.errLog,
-        label: "inbound",
-      });
-      if (downloaded.decryptedPicPath) {
-        // `image/*` is not a real MIME type: it told the model nothing and, paired
-        // with a `.bin` path, left an inbound photo unidentifiable (2026-08-02).
-        media = {
-          type: "image",
-          filePath: downloaded.decryptedPicPath,
-          // picMediaType is always set when decryptedPicPath is: an image path
-          // only exists once the bytes were positively identified.
-          mimeType: downloaded.picMediaType ?? "application/octet-stream",
-        };
-      } else if (downloaded.decryptedVideoPath) {
-        media = { type: "video", filePath: downloaded.decryptedVideoPath, mimeType: "video/mp4" };
-      } else if (downloaded.decryptedFilePath) {
-        media = {
-          type: "file",
-          filePath: downloaded.decryptedFilePath,
-          mimeType: downloaded.fileMediaType ?? "application/octet-stream",
-          fileName: mediaItem.file_item?.file_name ?? undefined,
-        };
-      } else if (downloaded.decryptedVoicePath) {
-        media = {
-          type: "audio",
-          filePath: downloaded.decryptedVoicePath,
-          mimeType: downloaded.voiceMediaType ?? "audio/wav",
-        };
-      }
-    } catch (err) {
-      logger.error(`media download failed: ${String(err)}`);
-    }
+  // Every downloadable attachment in this ONE message, in order. A failure on
+  // one must not discard the others: a two-photo turn where the second download
+  // fails should still deliver the first, with the loss stated out loud.
+  const mediaItems: MediaAttachment[] = [];
+  let totalMediaBytes = 0;
+  const allMedia = findMediaItems(full.item_list);
+  const allMediaItems = allMedia.items;
+  if (allMediaItems.length > 1) {
+    deps.log(`[weixin] inbound carries ${allMediaItems.length} attachments`);
   }
+  const skipped: string[] = [];
+  if (allMedia.candidateCount > allMediaItems.length) {
+    skipped.push(`${allMedia.candidateCount - allMediaItems.length} 个附件超出单条消息上限（最多 ${MAX_MEDIA_ITEMS} 个）`);
+  }
+  for (const item of allMediaItems) {
+    // The remaining budget is pushed DOWN into the download so an oversized
+    // attachment is refused while streaming — checking size after the fact has
+    // already paid the memory cost, and a 199MB running total could still be
+    // followed by a fresh 100MB read.
+    const remaining = MAX_TOTAL_MEDIA_BYTES - totalMediaBytes;
+    if (remaining <= 0) {
+      skipped.push("(budget exhausted)");
+      continue;
+    }
+    const one = await downloadOneAttachment(item, deps, remaining);
+    if (!one) {
+      skipped.push(item.file_item?.file_name ?? "attachment");
+      continue;
+    }
+    mediaItems.push(one);
+    try { totalMediaBytes += (await fs.stat(one.filePath)).size; } catch { /* size unknown */ }
+  }
+  // A log line is invisible to the person and to the model. The whole defect
+  // being fixed here is "an attachment vanished without anyone saying so", so
+  // the loss must ride into the SAME agent turn as structured text.
+  let missingNotice = "";
+  if (skipped.length) {
+    deps.errLog(`[weixin] ${skipped.length} attachment(s) not delivered: ${skipped.join(", ")}`);
+    missingNotice = [
+      "",
+      "[附件缺失说明]",
+      ...skipped.map((s, i) => `${i + 1}. ${s}`),
+      "以上附件没有送达，请不要假设它们的内容；需要的话请用户重新发送。",
+    ].join("\n");
+  }
+
+  let media: ChatRequest["media"] = mediaItems[0];
 
   // --- Build ChatRequest ---
   const request: ChatRequest = {
     conversationId: full.from_user_id ?? "",
-    text: bodyFromItemList(full.item_list),
+    text: `${bodyFromItemList(full.item_list)}${missingNotice}`,
     timing: { receivedAt },
+    // `media` stays the first attachment for legacy agents; `mediaItems`
+    // carries the full ordered set. Consumers should read normalizeChatMedia().
     media,
+    ...(mediaItems.length ? { mediaItems } : {}),
   };
 
   // --- Typing indicator (start + periodic refresh) ---
