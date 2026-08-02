@@ -108,6 +108,7 @@ export const MAX_TOTAL_MEDIA_BYTES = 200 * 1024 * 1024;
 async function downloadOneAttachment(
   item: MessageItem,
   deps: ProcessMessageDeps,
+  budgetBytes: number,
 ): Promise<MediaAttachment | undefined> {
   try {
     const d = await downloadMediaFromItem(item, {
@@ -116,7 +117,7 @@ async function downloadOneAttachment(
       log: deps.log,
       errLog: deps.errLog,
       label: "inbound",
-    });
+    }, budgetBytes);
     if (d.decryptedPicPath) {
       // picMediaType is always set alongside an image path: the path only
       // exists once the bytes were positively identified as an image.
@@ -207,15 +208,29 @@ export async function processOneMessage(
   if (allMediaItems.length > 1) {
     deps.log(`[weixin] inbound carries ${allMediaItems.length} attachments`);
   }
+  const skipped: string[] = [];
   for (const item of allMediaItems) {
-    if (totalMediaBytes >= MAX_TOTAL_MEDIA_BYTES) {
-      deps.errLog(`[weixin] attachment budget exhausted (${MAX_TOTAL_MEDIA_BYTES} bytes) — remaining attachments skipped`);
-      break;
+    // The remaining budget is pushed DOWN into the download so an oversized
+    // attachment is refused while streaming — checking size after the fact has
+    // already paid the memory cost, and a 199MB running total could still be
+    // followed by a fresh 100MB read.
+    const remaining = MAX_TOTAL_MEDIA_BYTES - totalMediaBytes;
+    if (remaining <= 0) {
+      skipped.push("(budget exhausted)");
+      continue;
     }
-    const one = await downloadOneAttachment(item, deps);
-    if (!one) continue;
+    const one = await downloadOneAttachment(item, deps, remaining);
+    if (!one) {
+      skipped.push(item.file_item?.file_name ?? "attachment");
+      continue;
+    }
     mediaItems.push(one);
     try { totalMediaBytes += (await fs.stat(one.filePath)).size; } catch { /* size unknown */ }
+  }
+  if (skipped.length) {
+    // Say what was dropped: a silently missing attachment is the defect we are
+    // fixing, so the over-budget path must not reintroduce it.
+    deps.errLog(`[weixin] ${skipped.length} attachment(s) not delivered (size limit or download failure): ${skipped.join(", ")}`);
   }
 
   let media: ChatRequest["media"] = mediaItems[0];

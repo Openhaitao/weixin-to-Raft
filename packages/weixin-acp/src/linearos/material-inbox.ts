@@ -6,6 +6,8 @@ import { normalizeChatMedia } from "weixin-agent-sdk";
 type Media = NonNullable<ChatRequest["media"]>;
 
 const MATERIAL_TTL_MS = 30 * 60 * 1000;
+/** Keep in step with MAX_MEDIA_ITEMS at the intake boundary. */
+const MATERIAL_LIST_MAX = 9;
 const MATERIAL_LINK_RE = /\/(minutes|docx|docs|doc|sheets|sheet|base|bitable|wiki|file|wenjian)\/|minute_token|obj_token/i;
 const URL_RE = /(?:https?:\/\/|www\.)\S+/i;
 
@@ -36,7 +38,10 @@ export function isMaterialInboxCancelText(text: string): boolean {
 
 export function isBareMaterialRequest(request: ChatRequest): boolean {
   const text = cleanText(request.text);
-  if (isMaterialMedia(request.media)) return !text;
+  // Any attachment in the message counts, not just the first: an audio note
+  // followed by a photo in the same message was misclassified when this only
+  // looked at `request.media`.
+  if (normalizeChatMedia(request).some(isMaterialMedia)) return !text;
   if (!text) return false;
   if (!MATERIAL_LINK_RE.test(text) && !URL_RE.test(text)) return false;
   const withoutUrls = text
@@ -59,7 +64,9 @@ function materialMediaLine(media: Media, index: number): string {
 
 function materialTextBlock(items: MaterialItem[], triggerText: string): string {
   const lines: string[] = [];
-  items.slice(0, 8).forEach((item, i) => {
+  // Must be >= the intake cap, or the last stashed attachment becomes
+  // unreachable in the very block that is supposed to surface it.
+  items.slice(0, MATERIAL_LIST_MAX).forEach((item, i) => {
     if (item.text) {
       lines.push(`${i + 1}. ${item.text.replace(/\s+/g, " ").slice(0, 2000)}`);
     } else if (item.media) {
@@ -97,16 +104,24 @@ export class MaterialInbox {
       : { conversationId: request.conversationId, items: [], ts: now };
     const text = cleanText(request.text);
     const attachments = normalizeChatMedia(request).filter(isMaterialMedia);
-    // One entry per attachment: a message carrying two photos must stash two
-    // materials, not one (the rest used to be dropped with request.media).
-    for (const media of attachments.slice(1)) {
-      box.items.push({ media, ts: now });
+    // One entry per attachment, in the SAME order the user sent them. The text
+    // rides on the first entry. (An earlier version pushed slice(1) before the
+    // first item, turning [a,b,c] into [b,c,a] — order is the whole point when
+    // the user says "compare these two".)
+    if (attachments.length) {
+      attachments.forEach((media, i) => {
+        box.items.push({
+          ...(i === 0 && text ? { text: text.slice(0, 2000) } : {}),
+          media,
+          ts: now,
+        });
+      });
+    } else {
+      box.items.push({
+        ...(text ? { text: text.slice(0, 2000) } : {}),
+        ts: now,
+      });
     }
-    box.items.push({
-      ...(text ? { text: text.slice(0, 2000) } : {}),
-      ...(attachments[0] ? { media: attachments[0] } : {}),
-      ts: now,
-    });
     box.ts = now;
     this.boxes.set(request.conversationId, box);
   }

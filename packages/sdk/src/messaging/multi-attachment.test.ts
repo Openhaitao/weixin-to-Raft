@@ -108,3 +108,53 @@ try {
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
 }
+
+// ── byte budget: enforced DURING download, not after ────────────────────────
+{
+  const { MediaBudgetExceededError } = await import("../cdn/pic-decrypt.js");
+  const { downloadMediaFromItem } = await import("../media/media-download.js");
+  const root2 = fs.mkdtempSync(path.join(os.tmpdir(), "budget-"));
+  try {
+    const big = Buffer.alloc(4096, 7);
+    const globalAny = globalThis as unknown as { fetch: unknown };
+    const realFetch = globalAny.fetch;
+    let readBytes = 0;
+    globalAny.fetch = async () =>
+      new Response(
+        new ReadableStream({
+          start(c) {
+            // Two chunks, so a mid-stream abort is observable.
+            readBytes += 2048; c.enqueue(new Uint8Array(big.subarray(0, 2048)));
+            readBytes += 2048; c.enqueue(new Uint8Array(big.subarray(2048)));
+            c.close();
+          },
+        }),
+        { status: 200 },
+      );
+    try {
+      const saved: string[] = [];
+      const res = await downloadMediaFromItem(
+        { type: 2, image_item: { media: { full_url: "https://cdn/x", aes_key: "" } } } as never,
+        {
+          cdnBaseUrl: "https://cdn",
+          saveMedia: async (b: Buffer) => {
+            const p = path.join(root2, `f${saved.length}.bin`); fs.writeFileSync(p, b); saved.push(p);
+            return { path: p };
+          },
+          log: () => {}, errLog: () => {}, label: "t",
+        } as never,
+        1024, // budget smaller than the payload
+      );
+      // Over-budget must NOT yield an attachment, and must not have written one.
+      assert.equal(res.decryptedPicPath, undefined, "over-budget attachment must not be delivered");
+      assert.equal(saved.length, 0, "over-budget attachment must not be written to disk");
+      assert.ok(MediaBudgetExceededError, "budget error type is exported for callers");
+    } finally {
+      globalAny.fetch = realFetch;
+    }
+  } finally {
+    fs.rmSync(root2, { recursive: true, force: true });
+  }
+}
+
+console.log("wechat attachment budget tests passed");
