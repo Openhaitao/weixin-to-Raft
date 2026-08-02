@@ -45,16 +45,42 @@ export interface ChatRequest {
     /** Time when the SDK started processing this inbound message. */
     receivedAt?: number;
   };
-  /** Attached media file (image, audio, video, or generic file). */
-  media?: {
-    type: "image" | "audio" | "video" | "file";
-    /** Local file path (already downloaded and decrypted). */
-    filePath: string;
-    /** MIME type, e.g. "image/jpeg", "audio/wav". */
-    mimeType: string;
-    /** Original filename (available for file attachments). */
-    fileName?: string;
-  };
+  /**
+   * First attached media file. LEGACY, kept so existing agents keep working —
+   * new consumers should read `normalizeChatMedia(request)` instead, which
+   * always yields the full ordered list. When a message carries several
+   * attachments this is `mediaItems[0]`.
+   */
+  media?: MediaAttachment;
+  /**
+   * All attachments carried by this ONE inbound message, in their original
+   * order. A WeChat message can pack several (two photos, an image plus a
+   * PDF); before 2026-08-02 only the first was processed and the rest were
+   * silently dropped.
+   */
+  mediaItems?: MediaAttachment[];
+}
+
+export interface MediaAttachment {
+  type: "image" | "audio" | "video" | "file";
+  /** Local file path (already downloaded and decrypted). */
+  filePath: string;
+  /** MIME type, e.g. "image/jpeg", "audio/wav". */
+  mimeType: string;
+  /** Original filename (available for file attachments). */
+  fileName?: string;
+}
+
+/**
+ * THE way to read attachments. Prefers the canonical plural field and falls
+ * back to the legacy singular one, so no consumer has to write that branch
+ * (and none can accidentally process the first item twice).
+ */
+export function normalizeChatMedia(
+  request: Pick<ChatRequest, "media" | "mediaItems">,
+): MediaAttachment[] {
+  if (request.mediaItems?.length) return request.mediaItems;
+  return request.media ? [request.media] : [];
 }
 
 export interface ChatResponse {

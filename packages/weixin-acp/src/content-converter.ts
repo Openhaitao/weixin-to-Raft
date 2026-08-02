@@ -1,13 +1,13 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 
-import type { ChatRequest } from "weixin-agent-sdk";
+import type { ChatRequest, MediaAttachment } from "weixin-agent-sdk";
+import { normalizeChatMedia } from "weixin-agent-sdk";
 import type { ContentBlock } from "@agentclientprotocol/sdk";
 
 import { extractPdfTextPreview, looksLikePdf } from "./linearos/pdf-text.js";
 
-async function localMediaNotice(request: ChatRequest): Promise<string> {
-  const media = request.media;
+async function localMediaNotice(media?: MediaAttachment): Promise<string> {
   if (!media) return "";
 
   let sizeLine = "";
@@ -56,28 +56,36 @@ export async function convertRequestToContentBlocks(
     blocks.push({ type: "text", text: request.text });
   }
 
-  if (request.media) {
-    const mimeType = request.media.mimeType;
-
-    switch (request.media.type) {
-      case "image": {
-        const data = await fs.readFile(request.media.filePath);
-        const base64 = data.toString("base64");
-        blocks.push({ type: "image", data: base64, mimeType });
-        break;
+  // EVERY attachment of this message becomes its own content block, in order.
+  // Emitting only `request.media` meant a two-photo message reached the model
+  // as one photo (2026-08-02). One unreadable attachment must not swallow the
+  // rest, so each is converted independently and failures degrade to a note.
+  for (const media of normalizeChatMedia(request)) {
+    try {
+      switch (media.type) {
+        case "image": {
+          const data = await fs.readFile(media.filePath);
+          blocks.push({ type: "image", data: data.toString("base64"), mimeType: media.mimeType });
+          break;
+        }
+        case "audio": {
+          const data = await fs.readFile(media.filePath);
+          blocks.push({ type: "audio", data: data.toString("base64"), mimeType: media.mimeType });
+          break;
+        }
+        case "video":
+        case "file": {
+          if (textAlreadyCarriesAttachment) break;
+          blocks.push({ type: "text", text: await localMediaNotice(media) });
+          break;
+        }
       }
-      case "audio": {
-        const data = await fs.readFile(request.media.filePath);
-        const base64 = data.toString("base64");
-        blocks.push({ type: "audio", data: base64, mimeType });
-        break;
-      }
-      case "video":
-      case "file": {
-        if (textAlreadyCarriesAttachment) break;
-        blocks.push({ type: "text", text: await localMediaNotice(request) });
-        break;
-      }
+    } catch (err) {
+      // Say what was lost rather than dropping it silently.
+      blocks.push({
+        type: "text",
+        text: `[Attachment unavailable] ${path.basename(media.filePath)} (${media.mimeType}) could not be read: ${String(err)}`,
+      });
     }
   }
 

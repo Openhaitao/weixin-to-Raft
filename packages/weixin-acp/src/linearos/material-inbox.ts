@@ -1,6 +1,7 @@
 import path from "node:path";
 
 import type { ChatRequest } from "weixin-agent-sdk";
+import { normalizeChatMedia } from "weixin-agent-sdk";
 
 type Media = NonNullable<ChatRequest["media"]>;
 
@@ -95,9 +96,15 @@ export class MaterialInbox {
       ? prev
       : { conversationId: request.conversationId, items: [], ts: now };
     const text = cleanText(request.text);
+    const attachments = normalizeChatMedia(request).filter(isMaterialMedia);
+    // One entry per attachment: a message carrying two photos must stash two
+    // materials, not one (the rest used to be dropped with request.media).
+    for (const media of attachments.slice(1)) {
+      box.items.push({ media, ts: now });
+    }
     box.items.push({
       ...(text ? { text: text.slice(0, 2000) } : {}),
-      ...(isMaterialMedia(request.media) ? { media: request.media } : {}),
+      ...(attachments[0] ? { media: attachments[0] } : {}),
       ts: now,
     });
     box.ts = now;
