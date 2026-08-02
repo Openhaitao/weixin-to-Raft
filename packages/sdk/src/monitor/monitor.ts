@@ -20,6 +20,50 @@ const RETRY_DELAY_MS = 2_000;
  * sleep, so a brief outage cost ~36s of silence ("怎么不说话了"). Doubling from
  * the retry delay keeps a short blip short and still protects a dead endpoint.
  */
+/** How many recent deliveries to remember for de-dup. */
+const SEEN_DELIVERY_MAX = 512;
+
+/**
+ * Bounded "have I already delivered this?" memory, used by the poll loop.
+ * A class rather than an inline Set so the regression can drive the SAME code
+ * the loop uses — testing an id helper alone would stay green even if the loop
+ * stopped calling it, which is the defect this exists to prevent.
+ */
+export class DeliveryDeduper {
+  private readonly seen = new Set<string>();
+  constructor(private readonly max = SEEN_DELIVERY_MAX) {}
+
+  /** True when this delivery has not been seen before (and records it). */
+  admit(msg: Parameters<typeof messageDeliveryId>[0]): boolean {
+    const id = messageDeliveryId(msg);
+    // Unidentifiable ⇒ always deliver: a rare duplicate beats a dropped message.
+    if (!id) return true;
+    if (this.seen.has(id)) return false;
+    this.seen.add(id);
+    if (this.seen.size > this.max) {
+      const keep = [...this.seen].slice(-Math.floor(this.max / 2));
+      this.seen.clear();
+      for (const k of keep) this.seen.add(k);
+    }
+    return true;
+  }
+
+  get size(): number { return this.seen.size; }
+}
+
+/**
+ * Stable per-delivery identity. `message_id` is the server's own id; `seq`
+ * disambiguates when it is absent. Returns "" when neither is usable, in which
+ * case we deliver (better a rare duplicate than a dropped message).
+ */
+export function messageDeliveryId(msg: {
+  message_id?: number; seq?: number; from_user_id?: string; create_time_ms?: number;
+}): string {
+  if (msg.message_id != null) return `m:${msg.message_id}`;
+  if (msg.seq != null) return `s:${msg.from_user_id ?? ""}:${msg.seq}`;
+  return "";
+}
+
 export function pollBackoffMs(consecutiveFailures: number): number {
   const step = Math.max(1, consecutiveFailures);
   return Math.min(RETRY_DELAY_MS * 2 ** (step - 1), BACKOFF_DELAY_MS);
@@ -74,6 +118,7 @@ export async function monitorWeixinProvider(opts: MonitorWeixinOpts): Promise<vo
 
   let nextTimeoutMs = longPollTimeoutMs ?? DEFAULT_LONG_POLL_TIMEOUT_MS;
   let consecutiveFailures = 0;
+  const deduper = new DeliveryDeduper();
 
   while (!abortSignal?.aborted) {
     try {
@@ -131,6 +176,16 @@ export async function monitorWeixinProvider(opts: MonitorWeixinOpts): Promise<vo
 
       const list = resp.msgs ?? [];
       for (const full of list) {
+        // Deliver each message ONCE. The poll cursor only advances when the
+        // server returns a non-empty get_updates_buf, so an empty buf re-serves
+        // the same batch and the same message reaches the agent again — the
+        // user sees one message answered twice, with the two replies talking
+        // past each other (observed 2026-08-02 after a sidecar restart).
+        // Identity-based de-dup holds regardless of what the cursor does.
+        if (!deduper.admit(full)) {
+          aLog.info(`skip duplicate delivery id=${messageDeliveryId(full)}`);
+          continue;
+        }
         aLog.info(
           `inbound: from=${full.from_user_id} types=${full.item_list?.map((i) => i.type).join(",") ?? "none"}`,
         );
