@@ -29,6 +29,22 @@ export function buildMediaSendFallbackText(responseText?: string): string {
   ].filter(Boolean).join("\n");
 }
 
+/**
+ * The last gate before disk. The streaming cap bounds CDN INPUT bytes; it does
+ * not bound what is finally written — SILK→WAV transcoding can multiply the
+ * data, so an in-budget download could still land an over-budget file and be
+ * delivered as if nothing were wrong.
+ *
+ * Exported so the regression can hit the PRODUCTION check rather than a mock
+ * that re-implements it (a test that asserts its own stub stays green when the
+ * real gate is deleted).
+ */
+export function assertWithinMediaBudget(buffer: Buffer, maxBytes?: number): void {
+  if (maxBytes != null && buffer.length > maxBytes) {
+    throw new MediaBudgetExceededError("saveMedia", maxBytes);
+  }
+}
+
 /** Save a buffer to a temporary file, returning the file path. */
 async function saveMediaBuffer(
   buffer: Buffer,
@@ -37,13 +53,7 @@ async function saveMediaBuffer(
   maxBytes?: number,
   originalFilename?: string,
 ): Promise<{ path: string }> {
-  // The streaming cap bounds CDN INPUT bytes; it does not bound what we
-  // finally write. Transcoding grows data (SILK→WAV can multiply it several
-  // times), so an in-budget download could still land an over-budget file and
-  // be delivered as if it were fine. This is the last gate before disk.
-  if (maxBytes != null && buffer.length > maxBytes) {
-    throw new MediaBudgetExceededError("saveMedia", maxBytes);
-  }
+  assertWithinMediaBudget(buffer, maxBytes);
   const dir = path.join(MEDIA_TEMP_DIR, subdir ?? "");
   await fs.mkdir(dir, { recursive: true });
   let ext = ".bin";

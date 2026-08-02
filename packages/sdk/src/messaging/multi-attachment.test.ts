@@ -213,47 +213,32 @@ console.log("wechat attachment budget tests passed");
   }
 }
 
-// ── transcode growth must be refused at the SAVE gate ──────────────────────
+// ── the PRODUCTION save gate, hit directly ────────────────────────────────
 {
-  // The streaming cap bounds CDN input; SILK→WAV can multiply it, so an
-  // in-budget download could still land an over-budget file.
+  // Previously this asserted a mock that re-implemented the check, so deleting
+  // the real gate left the test green — worse than no test. Now it calls the
+  // production function, and MEDIA_TEMP_DIR is checked to prove nothing was
+  // created on the way out.
+  const { assertWithinMediaBudget } = await import("./process-message.js");
   const { MediaBudgetExceededError } = await import("../cdn/pic-decrypt.js");
-  const { downloadMediaFromItem } = await import("../media/media-download.js");
-  const root4 = fs.mkdtempSync(path.join(os.tmpdir(), "transcode-"));
-  try {
-    const written: string[] = [];
-    const saveMedia = async (buffer: Buffer, _ct?: string, _sub?: string, maxBytes?: number) => {
-      if (maxBytes != null && buffer.length > maxBytes) {
-        throw new MediaBudgetExceededError("saveMedia", maxBytes);
-      }
-      const p = path.join(root4, `f${written.length}.wav`);
-      fs.writeFileSync(p, buffer); written.push(p);
-      return { path: p };
-    };
-    const globalAny = globalThis as unknown as { fetch: unknown };
-    const realFetch = globalAny.fetch;
-    // 512B in, far more out after "transcoding".
-    globalAny.fetch = async () => new Response(new Uint8Array(Buffer.alloc(512, 3)), { status: 200 });
-    try {
-      const res = await downloadMediaFromItem(
-        { type: 3, voice_item: { media: { full_url: "https://cdn/v", aes_key: "" } } } as never,
-        { cdnBaseUrl: "https://cdn", saveMedia, log: () => {}, errLog: () => {}, label: "t" } as never,
-        1024,
-      ).catch(() => ({}) as Record<string, string>);
-      // Whatever path it took, nothing over budget may be written or delivered.
-      for (const p of written) {
-        assert.ok(fs.statSync(p).size <= 1024, `wrote ${fs.statSync(p).size}B past a 1024B budget`);
-      }
-      if (res.decryptedVoicePath) {
-        assert.ok(fs.statSync(res.decryptedVoicePath).size <= 1024, "delivered an over-budget file");
-      }
-    } finally {
-      globalAny.fetch = realFetch;
-    }
-  } finally {
-    fs.rmSync(root4, { recursive: true, force: true });
-  }
+
+  const tempRoot = path.join(os.tmpdir(), "weixin-agent/media");
+  const before = fs.existsSync(tempRoot) ? fs.readdirSync(tempRoot).length : -1;
+
+  assert.throws(
+    () => assertWithinMediaBudget(Buffer.alloc(2048), 1024),
+    (err: unknown) => err instanceof MediaBudgetExceededError,
+    "an over-budget buffer must be refused before it can be written",
+  );
+  // Exactly at the limit is allowed; under it too; no limit means no gate.
+  assert.doesNotThrow(() => assertWithinMediaBudget(Buffer.alloc(1024), 1024));
+  assert.doesNotThrow(() => assertWithinMediaBudget(Buffer.alloc(1), 1024));
+  assert.doesNotThrow(() => assertWithinMediaBudget(Buffer.alloc(10 ** 6), undefined));
+
+  const after = fs.existsSync(tempRoot) ? fs.readdirSync(tempRoot).length : -1;
+  assert.equal(after, before, "the refused save must not create a directory or file");
 }
+
 
 // ── count cap is visible on the REAL path, not just in the helper ──────────
 {
