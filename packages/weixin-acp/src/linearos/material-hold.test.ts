@@ -116,3 +116,45 @@ console.log("material hold tests passed");
     assert.fail("clarify branch was not reached — this test would prove nothing");
   }
 }
+
+// --- INTENDED BEHAVIOUR: bare material is held, not answered ---------------
+// This is a product decision, not an oversight. Sending files/links on their
+// own is meant to be silent; the reply comes with the message that says what
+// to do with them. A previous change read that silence as a swallowed-message
+// bug and answered each bare photo immediately, which broke the "send the
+// files, then ask" flow. If you are here because the silence looks wrong,
+// this test is the answer: it is deliberate.
+{
+  const inbox = new MaterialInbox();
+  const conversationId = "c-intent";
+
+  // Three bare sends in a row: nothing is answered, everything is kept in order.
+  inbox.stash({ conversationId, text: "", deliveryId: "m:1", media: img("a"), mediaItems: [img("a")] } as never);
+  inbox.stash({ conversationId, text: "", deliveryId: "m:2", media: img("b"), mediaItems: [img("b")] } as never);
+  inbox.stash({ conversationId, text: "", deliveryId: "m:3", media: img("c"), mediaItems: [img("c")] } as never);
+  assert.equal(inbox.peek(conversationId)?.items.length, 3, "every bare send is kept");
+
+  // Then the user says what they want: all of it rides along with that turn.
+  const merged = inbox.mergeInto({ conversationId, text: "这三张对比一下" } as never);
+  assert.equal(
+    merged.request.mediaItems?.length,
+    3,
+    "the triggering message must carry every held attachment, not just the first",
+  );
+  const body = String(merged.request.text);
+  const order = ["a.jpg", "b.jpg", "c.jpg"].map((n) => body.indexOf(n));
+  assert.ok(order.every((i) => i >= 0), "all three must be listed");
+  assert.ok(order[0] < order[1] && order[1] < order[2], "in the order they were sent");
+  assert.ok(body.includes("这三张对比一下"), "the user's actual question is still the request");
+  console.log("intended: bare material held silently, delivered with the triggering message");
+}
+
+// --- cancelling drops what was held ---------------------------------------
+{
+  const inbox = new MaterialInbox();
+  inbox.stash({ conversationId: "c-cancel", text: "", deliveryId: "m:9", media: img("a"), mediaItems: [img("a")] } as never);
+  assert.equal(inbox.has("c-cancel"), true);
+  const { isMaterialInboxCancelText } = await import("./material-inbox.js");
+  assert.equal(isMaterialInboxCancelText("算了"), true, "a cancel word must be recognised");
+  console.log("intended: a cancel word releases held material");
+}

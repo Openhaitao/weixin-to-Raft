@@ -125,21 +125,20 @@ export class AcpAgent implements Agent {
     request = routed.request;
 
     if (isBareMaterialRequest(request)) {
-      // Claim material ONLY when a flow is actually waiting for it. This used
-      // to claim on shape alone — any photo, file or link with no caption was
-      // swallowed and answered with nothing, whether or not anyone was waiting
-      // for it. That is the "sometimes it just doesn't reply" people report: a
-      // message is not a flow's material because of what it contains, only
-      // because the conversation is in a state that asked for it.
-      const awaiting = (await this.projectCreateFlow.isAwaitingMaterial(request.conversationId))
-        || (await this.projectFollowupFlow.isAwaitingMaterial(request.conversationId));
-      if (awaiting) {
-        this.materialInbox.stash(request);
-        log(`material inbox stashed conversation=${request.conversationId} media=${request.media?.type || "text"}`);
-        // Silent on purpose: the material waits for the command that will use it.
-        return { silent: true };
-      }
-      // Otherwise it is an ordinary message and gets an ordinary answer.
+      // Attachments and links sent on their own are held, not answered: the
+      // reply comes when the user says what they want done with them. This is
+      // the intended product behaviour, not an accident — an earlier change
+      // read the silence as a bug and answered each bare photo immediately,
+      // which broke the "send the files, then ask" flow people actually use.
+      //
+      // Holding is safe here precisely BECAUSE nothing is sent: no reply means
+      // no durable commit, so a restart drops the material and the ledger
+      // record together and the server's redelivery re-stashes it once. A
+      // branch that both replies AND holds cannot say that (see the clarify
+      // branch in project-followup-flow).
+      this.materialInbox.stash(request);
+      log(`material inbox stashed conversation=${request.conversationId} media=${request.media?.type || "text"}`);
+      return { silent: true };
     }
 
     let mergedMaterial = false;
