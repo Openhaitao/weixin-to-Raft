@@ -213,30 +213,29 @@ console.log("wechat attachment budget tests passed");
   }
 }
 
-// ── the PRODUCTION save gate, hit directly ────────────────────────────────
+// ── the PRODUCTION save path, hit directly ────────────────────────────────
 {
-  // Previously this asserted a mock that re-implemented the check, so deleting
-  // the real gate left the test green — worse than no test. Now it calls the
-  // production function, and MEDIA_TEMP_DIR is checked to prove nothing was
-  // created on the way out.
-  const { assertWithinMediaBudget } = await import("./process-message.js");
+  // Testing the shared helper was not enough: deleting the CALL inside
+  // saveMediaBuffer still left it green, which is exactly the original defect
+  // ("saveMediaBuffer ignores maxBytes"). The wiring is what must be pinned.
+  const { saveMediaBuffer } = await import("./process-message.js");
   const { MediaBudgetExceededError } = await import("../cdn/pic-decrypt.js");
 
-  const tempRoot = path.join(os.tmpdir(), "weixin-agent/media");
-  const before = fs.existsSync(tempRoot) ? fs.readdirSync(tempRoot).length : -1;
+  const subdir = `budget-wiring-${process.pid}-${Date.now()}`;
+  const dir = path.join(os.tmpdir(), "weixin-agent/media", subdir);
 
-  assert.throws(
-    () => assertWithinMediaBudget(Buffer.alloc(2048), 1024),
+  await assert.rejects(
+    () => saveMediaBuffer(Buffer.alloc(2048), "audio/wav", subdir, 1024),
     (err: unknown) => err instanceof MediaBudgetExceededError,
-    "an over-budget buffer must be refused before it can be written",
+    "saveMediaBuffer must refuse a buffer larger than its budget",
   );
-  // Exactly at the limit is allowed; under it too; no limit means no gate.
-  assert.doesNotThrow(() => assertWithinMediaBudget(Buffer.alloc(1024), 1024));
-  assert.doesNotThrow(() => assertWithinMediaBudget(Buffer.alloc(1), 1024));
-  assert.doesNotThrow(() => assertWithinMediaBudget(Buffer.alloc(10 ** 6), undefined));
+  assert.equal(fs.existsSync(dir), false, "the refused save must not even create its directory");
 
-  const after = fs.existsSync(tempRoot) ? fs.readdirSync(tempRoot).length : -1;
-  assert.equal(after, before, "the refused save must not create a directory or file");
+  // Exactly at the budget still writes — the gate must not be over-tight.
+  const ok = await saveMediaBuffer(Buffer.alloc(1024, 9), "audio/wav", subdir, 1024);
+  assert.ok(fs.existsSync(ok.path), "an in-budget buffer must still be written");
+  assert.equal(fs.statSync(ok.path).size, 1024);
+  fs.rmSync(dir, { recursive: true, force: true });
 }
 
 

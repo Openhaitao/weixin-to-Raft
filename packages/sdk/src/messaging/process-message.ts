@@ -46,7 +46,7 @@ export function assertWithinMediaBudget(buffer: Buffer, maxBytes?: number): void
 }
 
 /** Save a buffer to a temporary file, returning the file path. */
-async function saveMediaBuffer(
+export async function saveMediaBuffer(
   buffer: Buffer,
   contentType?: string,
   subdir?: string,
