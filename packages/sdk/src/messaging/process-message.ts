@@ -174,7 +174,13 @@ export async function processOneMessage(
         label: "inbound",
       });
       if (downloaded.decryptedPicPath) {
-        media = { type: "image", filePath: downloaded.decryptedPicPath, mimeType: "image/*" };
+        // `image/*` is not a real MIME type: it told the model nothing and, paired
+        // with a `.bin` path, left an inbound photo unidentifiable (2026-08-02).
+        media = {
+          type: "image",
+          filePath: downloaded.decryptedPicPath,
+          mimeType: downloaded.picMediaType ?? "image/jpeg",
+        };
       } else if (downloaded.decryptedVideoPath) {
         media = { type: "video", filePath: downloaded.decryptedVideoPath, mimeType: "video/mp4" };
       } else if (downloaded.decryptedFilePath) {

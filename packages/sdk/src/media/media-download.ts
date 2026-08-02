@@ -1,6 +1,6 @@
 import type { WeixinInboundMediaOpts } from "../messaging/inbound.js";
 import { logger } from "../util/logger.js";
-import { getMimeFromFilename } from "./mime.js";
+import { getMimeFromFilename, sniffImageMime } from "./mime.js";
 import {
   downloadAndDecryptBuffer,
   downloadPlainCdnBuffer,
@@ -61,9 +61,14 @@ export async function downloadMediaFromItem(
             `${label} image-plain`,
             img.media.full_url,
           );
-      const saved = await saveMedia(buf, undefined, "inbound", WEIXIN_MEDIA_MAX_BYTES);
+      // Sniff the real type: WeChat gives no filename and no content-type, so
+      // passing undefined here made every image land as `.bin` — unreadable to
+      // a model that only receives the path.
+      const picMime = sniffImageMime(buf) ?? "image/jpeg";
+      const saved = await saveMedia(buf, picMime, "inbound", WEIXIN_MEDIA_MAX_BYTES);
       result.decryptedPicPath = saved.path;
-      logger.debug(`${label} image saved: ${saved.path}`);
+      result.picMediaType = picMime;
+      logger.debug(`${label} image saved: ${saved.path} (${picMime})`);
     } catch (err) {
       logger.error(`${label} image download/decrypt failed: ${String(err)}`);
       errLog(`weixin ${label} image download/decrypt failed: ${String(err)}`);

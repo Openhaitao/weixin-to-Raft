@@ -108,6 +108,8 @@ export function bodyFromItemList(itemList?: MessageItem[]): string {
 export type WeixinInboundMediaOpts = {
   /** Local path to decrypted image file. */
   decryptedPicPath?: string;
+  /** MIME type sniffed from the image's magic bytes. */
+  picMediaType?: string;
   /** Local path to transcoded/raw voice file (.wav or .silk). */
   decryptedVoicePath?: string;
   /** MIME type for the voice file (e.g. "audio/wav" or "audio/silk"). */
