@@ -4,7 +4,7 @@
     "test:wechat-bind": "node scripts/wechat-bind-demo.test.mjs",
     "test:model-command": "pnpm --filter weixin-acp exec tsx ../sdk/src/messaging/slash-commands.test.ts && pnpm --filter weixin-acp test:model-command",
     "typecheck": "pnpm --filter weixin-agent-sdk build && pnpm -r run typecheck",
-    "test:linearos": "pnpm --filter weixin-acp test:project-flow && pnpm --filter weixin-acp test:followup-flow && pnpm --filter weixin-acp test:contract && pnpm --filter weixin-acp test:linearos",
+    "test:linearos": "pnpm --filter weixin-acp test:project-flow && pnpm --filter weixin-acp test:followup-flow && pnpm --filter weixin-acp test:contract && pnpm --filter weixin-acp test:linearos && pnpm --filter weixin-acp exec tsx src/linearos/recall-injection.test.ts",
     "test:media": "pnpm --filter weixin-acp exec tsx ../sdk/src/media/mime-sniff.test.ts && pnpm --filter weixin-acp exec tsx ../sdk/src/media/image-pipeline.test.ts && pnpm --filter weixin-acp exec tsx ../sdk/src/monitor/poll-backoff.test.ts && pnpm --filter weixin-acp exec tsx ../sdk/src/messaging/multi-attachment.test.ts && pnpm --filter weixin-acp exec tsx src/linearos/material-inbox-multi.test.ts && pnpm --filter weixin-acp exec tsx ../sdk/src/monitor/delivery-ledger.test.ts && pnpm --filter weixin-acp exec tsx ../sdk/src/messaging/slash-delivery.test.ts && pnpm --filter weixin-acp exec tsx ../sdk/src/messaging/empty-response.test.ts && pnpm --filter weixin-acp exec tsx src/linearos/material-hold.test.ts"
   }
 }

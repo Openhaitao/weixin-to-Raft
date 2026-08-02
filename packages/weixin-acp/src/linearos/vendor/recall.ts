@@ -1,6 +1,6 @@
 // Vendored from LinearOS src/memory/recall.ts
-// source commit: 5a55d5f48810ea601aeb0dc6c40cb60b853d602d
-// source sha256: 96fd0601e8822e37ff4d2a6628502c28ce3510faccae7dbffb27ec2a6af34b02
+// source commit: 6d0338e77b4e874421c120c013bc2d52705e5b59
+// source sha256: 7eae518f081670afd5b5982a515a1944f4cf8322802fc1921e9d34a4f16be381
 // Do not edit by hand; run the drift sentinel after refreshing this file.
 // @ts-nocheck
 
@@ -73,6 +73,17 @@ export function retrieveRelevant(facts: MemoryFact[], query: string, topN = 5): 
  * yet (fresh bot) → zero injection. `query` = the current user message.
  */
 export function buildRecallInjection(memoryDir: string, query: string, topN = 5): string {
+  // Nothing to recall against: an attachment-only turn carries no words. The
+  // block used to be injected anyway, which made the memory header the ONLY
+  // text in the user's turn — send a bare photo and the bot would start
+  // talking about its memory instead of the photo.
+  //
+  // The index IS still injected whenever there are words, even if nothing
+  // scores: it is the bot's recovery map, and the V1 scorer is weak enough
+  // that dropping it on a miss would make a keyword miss look like an absent
+  // memory.
+  if (!tokenize(query).length) return '';
+
   const index = loadIndex(memoryDir);
   const facts = loadFacts(memoryDir);
   const relevant = retrieveRelevant(facts, query, topN);
