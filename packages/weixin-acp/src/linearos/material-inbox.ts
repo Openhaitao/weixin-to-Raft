@@ -126,18 +126,21 @@ export class MaterialInbox {
           ts: now,
         });
       });
-      // Bound the accumulated box too: keep the MOST RECENT materials, and
-      // remember how many older ones were dropped so the merged block can say
-      // so instead of quietly showing a subset.
-      if (box.items.length > MATERIAL_LIST_MAX) {
-        box.dropped = (box.dropped ?? 0) + (box.items.length - MATERIAL_LIST_MAX);
-        box.items = box.items.slice(-MATERIAL_LIST_MAX);
-      }
+
     } else {
       box.items.push({
         ...(text ? { text: text.slice(0, 2000) } : {}),
         ts: now,
       });
+    }
+
+    // Bound the accumulated box AFTER both branches: link-only materials take
+    // the else path and used to accumulate without any ceiling for the full
+    // 30-minute window. Keep the most recent and count what was evicted, so a
+    // truncated set is never presented as complete.
+    if (box.items.length > MATERIAL_LIST_MAX) {
+      box.dropped = (box.dropped ?? 0) + (box.items.length - MATERIAL_LIST_MAX);
+      box.items = box.items.slice(-MATERIAL_LIST_MAX);
     }
     box.ts = now;
     this.boxes.set(request.conversationId, box);

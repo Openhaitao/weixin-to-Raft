@@ -94,3 +94,20 @@ console.log("material inbox multi-attachment tests passed");
 }
 
 console.log("material inbox accumulation tests passed");
+
+// ── link-only materials must obey the same ceiling ─────────────────────────
+{
+  // Link-only bare materials take the else branch in stash(), which used to
+  // skip the ceiling entirely — 30 minutes of unbounded accumulation.
+  const inbox = new MaterialInbox();
+  for (let i = 0; i < 60; i++) {
+    inbox.stash({ conversationId: "c5", text: `https://example.com/doc/${i}` } as never);
+  }
+  const body = String(inbox.mergeInto({ conversationId: "c5", text: "整理" } as never).text);
+  assert.ok(body.includes("因超出缓存上限已丢弃"), "eviction must be stated for link-only materials too");
+  // Most recent retained.
+  assert.ok(body.includes("doc/59"), "the newest link must be retained");
+  assert.ok(!body.includes("doc/0\n") && !body.includes("doc/0 "), "the oldest link must have been evicted");
+}
+
+console.log("material inbox link-only ceiling tests passed");

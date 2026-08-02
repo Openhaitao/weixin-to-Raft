@@ -212,3 +212,77 @@ console.log("wechat attachment budget tests passed");
     fs.rmSync(root3, { recursive: true, force: true });
   }
 }
+
+// ── transcode growth must be refused at the SAVE gate ──────────────────────
+{
+  // The streaming cap bounds CDN input; SILK→WAV can multiply it, so an
+  // in-budget download could still land an over-budget file.
+  const { MediaBudgetExceededError } = await import("../cdn/pic-decrypt.js");
+  const { downloadMediaFromItem } = await import("../media/media-download.js");
+  const root4 = fs.mkdtempSync(path.join(os.tmpdir(), "transcode-"));
+  try {
+    const written: string[] = [];
+    const saveMedia = async (buffer: Buffer, _ct?: string, _sub?: string, maxBytes?: number) => {
+      if (maxBytes != null && buffer.length > maxBytes) {
+        throw new MediaBudgetExceededError("saveMedia", maxBytes);
+      }
+      const p = path.join(root4, `f${written.length}.wav`);
+      fs.writeFileSync(p, buffer); written.push(p);
+      return { path: p };
+    };
+    const globalAny = globalThis as unknown as { fetch: unknown };
+    const realFetch = globalAny.fetch;
+    // 512B in, far more out after "transcoding".
+    globalAny.fetch = async () => new Response(new Uint8Array(Buffer.alloc(512, 3)), { status: 200 });
+    try {
+      const res = await downloadMediaFromItem(
+        { type: 3, voice_item: { media: { full_url: "https://cdn/v", aes_key: "" } } } as never,
+        { cdnBaseUrl: "https://cdn", saveMedia, log: () => {}, errLog: () => {}, label: "t" } as never,
+        1024,
+      ).catch(() => ({}) as Record<string, string>);
+      // Whatever path it took, nothing over budget may be written or delivered.
+      for (const p of written) {
+        assert.ok(fs.statSync(p).size <= 1024, `wrote ${fs.statSync(p).size}B past a 1024B budget`);
+      }
+      if (res.decryptedVoicePath) {
+        assert.ok(fs.statSync(res.decryptedVoicePath).size <= 1024, "delivered an over-budget file");
+      }
+    } finally {
+      globalAny.fetch = realFetch;
+    }
+  } finally {
+    fs.rmSync(root4, { recursive: true, force: true });
+  }
+}
+
+// ── count cap is visible on the REAL path, not just in the helper ──────────
+{
+  const { processOneMessage } = await import("./process-message.js");
+  const seen: string[] = [];
+  const globalAny = globalThis as unknown as { fetch: unknown };
+  const realFetch = globalAny.fetch;
+  globalAny.fetch = async () => { throw new Error("cdn down"); };
+  try {
+    await processOneMessage(
+      {
+        from_user_id: "u2",
+        item_list: [
+          { type: 1, text_item: { text: "都看一下" } },
+          ...Array.from({ length: 14 }, (_, i) => ({
+            type: 2, image_item: { media: { full_url: `https://cdn/${i}`, aes_key: "" } },
+          })),
+        ],
+      } as never,
+      {
+        accountId: "a", agent: { chat: async (r: { text: string }) => { seen.push(r.text); return {}; } } as never,
+        baseUrl: "https://api", cdnBaseUrl: "https://cdn", log: () => {}, errLog: () => {},
+      } as never,
+    );
+  } finally {
+    globalAny.fetch = realFetch;
+  }
+  assert.equal(seen.length, 1);
+  assert.ok(seen[0].includes("超出单条消息上限"), "the 5 attachments over the cap must be stated to the agent");
+}
+
+console.log("attachment save-gate and count-cap visibility tests passed");

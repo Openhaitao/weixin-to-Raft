@@ -9,6 +9,7 @@ import type { WeixinMessage, MessageItem } from "../api/types.js";
 import { MessageItemType, TypingStatus } from "../api/types.js";
 import { downloadRemoteImageToTemp } from "../cdn/upload.js";
 import { downloadMediaFromItem } from "../media/media-download.js";
+import { MediaBudgetExceededError } from "../cdn/pic-decrypt.js";
 import { getExtensionFromMime } from "../media/mime.js";
 import { logger } from "../util/logger.js";
 
@@ -33,9 +34,16 @@ async function saveMediaBuffer(
   buffer: Buffer,
   contentType?: string,
   subdir?: string,
-  _maxBytes?: number,
+  maxBytes?: number,
   originalFilename?: string,
 ): Promise<{ path: string }> {
+  // The streaming cap bounds CDN INPUT bytes; it does not bound what we
+  // finally write. Transcoding grows data (SILK→WAV can multiply it several
+  // times), so an in-budget download could still land an over-budget file and
+  // be delivered as if it were fine. This is the last gate before disk.
+  if (maxBytes != null && buffer.length > maxBytes) {
+    throw new MediaBudgetExceededError("saveMedia", maxBytes);
+  }
   const dir = path.join(MEDIA_TEMP_DIR, subdir ?? "");
   await fs.mkdir(dir, { recursive: true });
   let ext = ".bin";
