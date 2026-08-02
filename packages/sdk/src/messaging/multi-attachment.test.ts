@@ -22,20 +22,24 @@ const voiceTranscribed = () => ({ type: 3, voice_item: { text: "已转写", medi
 
 // ── selection: order preserved, every downloadable item kept ────────────────
 {
-  const items = findMediaItems([textItem("看看"), imageItem("a"), fileItem("b.pdf"), imageItem("c")] as never);
+  const { items } = findMediaItems([textItem("看看"), imageItem("a"), fileItem("b.pdf"), imageItem("c")] as never);
   assert.equal(items.length, 3, "text is not media; all three attachments kept");
   assert.equal((items[0] as never as { image_item: { media: { full_url: string } } }).image_item.media.full_url, "https://cdn/a");
   assert.equal((items[2] as never as { image_item: { media: { full_url: string } } }).image_item.media.full_url, "https://cdn/c");
 }
 // A voice note that already carries a transcript needs no download.
-assert.equal(findMediaItems([voiceTranscribed()] as never).length, 0);
-assert.equal(findMediaItems([]).length, 0);
-assert.equal(findMediaItems(undefined).length, 0);
+assert.equal(findMediaItems([voiceTranscribed()] as never).items.length, 0);
+assert.equal(findMediaItems([]).items.length, 0);
+assert.equal(findMediaItems(undefined).items.length, 0);
 
 // ── cap: fail-closed, never an unbounded fetch ─────────────────────────────
 {
   const many = Array.from({ length: MAX_MEDIA_ITEMS + 5 }, (_, i) => imageItem(`i${i}`));
-  assert.equal(findMediaItems(many as never).length, MAX_MEDIA_ITEMS);
+  const capped = findMediaItems(many as never);
+  assert.equal(capped.items.length, MAX_MEDIA_ITEMS);
+  // The original count must survive the cap, so the truncation can be reported
+  // instead of the extra attachments simply not existing.
+  assert.equal(capped.candidateCount, MAX_MEDIA_ITEMS + 5);
 }
 
 // ── normalize: plural wins, legacy single still works, no double-count ──────
@@ -158,3 +162,53 @@ try {
 }
 
 console.log("wechat attachment budget tests passed");
+
+// ── the loss must reach the AGENT, not just a log line ─────────────────────
+{
+  const { processOneMessage } = await import("./process-message.js");
+  const root3 = fs.mkdtempSync(path.join(os.tmpdir(), "notice-"));
+  try {
+    const seen: Array<{ text: string; mediaItems?: unknown[] }> = [];
+    const agent = {
+      chat: async (req: { text: string; mediaItems?: unknown[] }) => {
+        seen.push({ text: req.text, mediaItems: req.mediaItems });
+        return {};
+      },
+    };
+    const globalAny = globalThis as unknown as { fetch: unknown };
+    const realFetch = globalAny.fetch;
+    // Every CDN read fails, so every attachment is lost.
+    globalAny.fetch = async () => { throw new Error("cdn down"); };
+    try {
+      await processOneMessage(
+        {
+          from_user_id: "u1",
+          item_list: [
+            { type: 1, text_item: { text: "对比这两张" } },
+            { type: 2, image_item: { media: { full_url: "https://cdn/a", aes_key: "" } } },
+            { type: 2, image_item: { media: { full_url: "https://cdn/b", aes_key: "" } } },
+          ],
+        } as never,
+        {
+          accountId: "acct", agent: agent as never, baseUrl: "https://api",
+          cdnBaseUrl: "https://cdn", log: () => {}, errLog: () => {},
+        } as never,
+      );
+    } finally {
+      globalAny.fetch = realFetch;
+    }
+
+    assert.equal(seen.length, 1, "one inbound message is still exactly one agent turn");
+    const text = seen[0].text;
+    // The defect being fixed: the model used to see only "对比这两张" and would
+    // reason as if both photos were present.
+    assert.ok(text.includes("对比这两张"), "original text preserved");
+    assert.ok(text.includes("[附件缺失说明]"), "the agent must be told attachments are missing");
+    assert.ok(text.includes("不要假设它们的内容"), "and told not to invent their contents");
+    assert.ok(!seen[0].mediaItems?.length, "no attachment was delivered");
+
+    console.log("attachment loss notice reaches the agent");
+  } finally {
+    fs.rmSync(root3, { recursive: true, force: true });
+  }
+}

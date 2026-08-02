@@ -145,9 +145,15 @@ async function downloadOneAttachment(
   }
 }
 
-export function findMediaItems(itemList?: MessageItem[]): MessageItem[] {
-  if (!itemList?.length) return [];
-  return itemList.filter(isDownloadableMediaItem).slice(0, MAX_MEDIA_ITEMS);
+export function findMediaItems(itemList?: MessageItem[]): {
+  items: MessageItem[];
+  /** How many downloadable attachments the message actually carried. Kept so a
+   * count-cap truncation can be reported instead of vanishing silently. */
+  candidateCount: number;
+} {
+  if (!itemList?.length) return { items: [], candidateCount: 0 };
+  const all = itemList.filter(isDownloadableMediaItem);
+  return { items: all.slice(0, MAX_MEDIA_ITEMS), candidateCount: all.length };
 }
 
 export async function processOneMessage(
@@ -204,11 +210,15 @@ export async function processOneMessage(
   // fails should still deliver the first, with the loss stated out loud.
   const mediaItems: MediaAttachment[] = [];
   let totalMediaBytes = 0;
-  const allMediaItems = findMediaItems(full.item_list);
+  const allMedia = findMediaItems(full.item_list);
+  const allMediaItems = allMedia.items;
   if (allMediaItems.length > 1) {
     deps.log(`[weixin] inbound carries ${allMediaItems.length} attachments`);
   }
   const skipped: string[] = [];
+  if (allMedia.candidateCount > allMediaItems.length) {
+    skipped.push(`${allMedia.candidateCount - allMediaItems.length} 个附件超出单条消息上限（最多 ${MAX_MEDIA_ITEMS} 个）`);
+  }
   for (const item of allMediaItems) {
     // The remaining budget is pushed DOWN into the download so an oversized
     // attachment is refused while streaming — checking size after the fact has
@@ -227,10 +237,18 @@ export async function processOneMessage(
     mediaItems.push(one);
     try { totalMediaBytes += (await fs.stat(one.filePath)).size; } catch { /* size unknown */ }
   }
+  // A log line is invisible to the person and to the model. The whole defect
+  // being fixed here is "an attachment vanished without anyone saying so", so
+  // the loss must ride into the SAME agent turn as structured text.
+  let missingNotice = "";
   if (skipped.length) {
-    // Say what was dropped: a silently missing attachment is the defect we are
-    // fixing, so the over-budget path must not reintroduce it.
-    deps.errLog(`[weixin] ${skipped.length} attachment(s) not delivered (size limit or download failure): ${skipped.join(", ")}`);
+    deps.errLog(`[weixin] ${skipped.length} attachment(s) not delivered: ${skipped.join(", ")}`);
+    missingNotice = [
+      "",
+      "[附件缺失说明]",
+      ...skipped.map((s, i) => `${i + 1}. ${s}`),
+      "以上附件没有送达，请不要假设它们的内容；需要的话请用户重新发送。",
+    ].join("\n");
   }
 
   let media: ChatRequest["media"] = mediaItems[0];
@@ -238,7 +256,7 @@ export async function processOneMessage(
   // --- Build ChatRequest ---
   const request: ChatRequest = {
     conversationId: full.from_user_id ?? "",
-    text: bodyFromItemList(full.item_list),
+    text: `${bodyFromItemList(full.item_list)}${missingNotice}`,
     timing: { receivedAt },
     // `media` stays the first attachment for legacy agents; `mediaItems`
     // carries the full ordered set. Consumers should read normalizeChatMedia().

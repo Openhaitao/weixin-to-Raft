@@ -1,13 +1,17 @@
 import path from "node:path";
 
 import type { ChatRequest } from "weixin-agent-sdk";
-import { normalizeChatMedia } from "weixin-agent-sdk";
+import { MAX_MEDIA_ITEMS, normalizeChatMedia } from "weixin-agent-sdk";
 
 type Media = NonNullable<ChatRequest["media"]>;
 
 const MATERIAL_TTL_MS = 30 * 60 * 1000;
-/** Keep in step with MAX_MEDIA_ITEMS at the intake boundary. */
-const MATERIAL_LIST_MAX = 9;
+/** The inbox accumulates across MESSAGES for up to 30 minutes, so its ceiling
+ * is a multiple of the per-message intake cap rather than a second literal.
+ * Everything stashed must stay reachable in the merged block — an inbox that
+ * silently shows only its first N items is the same vanishing-attachment bug
+ * one layer up. */
+const MATERIAL_LIST_MAX = MAX_MEDIA_ITEMS * 4;
 const MATERIAL_LINK_RE = /\/(minutes|docx|docs|doc|sheets|sheet|base|bitable|wiki|file|wenjian)\/|minute_token|obj_token/i;
 const URL_RE = /(?:https?:\/\/|www\.)\S+/i;
 
@@ -21,6 +25,9 @@ interface MaterialBox {
   conversationId: string;
   items: MaterialItem[];
   ts: number;
+  /** Oldest materials evicted by the box ceiling. Surfaced in the merged block
+   * so a truncated set is never presented as if it were complete. */
+  dropped?: number;
 }
 
 function cleanText(text: string): string {
@@ -62,11 +69,11 @@ function materialMediaLine(media: Media, index: number): string {
   ].join(" · ");
 }
 
-function materialTextBlock(items: MaterialItem[], triggerText: string): string {
+function materialTextBlock(items: MaterialItem[], triggerText: string, dropped = 0): string {
   const lines: string[] = [];
-  // Must be >= the intake cap, or the last stashed attachment becomes
-  // unreachable in the very block that is supposed to surface it.
-  items.slice(0, MATERIAL_LIST_MAX).forEach((item, i) => {
+  // The box is already bounded at stash time, so everything held is listed —
+  // showing a subset here would recreate the vanishing-attachment bug.
+  items.forEach((item, i) => {
     if (item.text) {
       lines.push(`${i + 1}. ${item.text.replace(/\s+/g, " ").slice(0, 2000)}`);
     } else if (item.media) {
@@ -78,6 +85,9 @@ function materialTextBlock(items: MaterialItem[], triggerText: string): string {
     "",
     "【Material Inbox / 刚才用户单独发送的材料】",
     `用户刚才连续发送了 ${items.length} 个材料，系统已静默缓存，没有单独回复。现在这句话才是触发意图。`,
+    ...(dropped > 0
+      ? [`注意：更早的 ${dropped} 个材料因超出缓存上限已丢弃，不要假设它们的内容。`]
+      : []),
     "材料清单：",
     ...(lines.length ? lines : ["（材料已缓存）"]),
   ].join("\n").trim();
@@ -116,6 +126,13 @@ export class MaterialInbox {
           ts: now,
         });
       });
+      // Bound the accumulated box too: keep the MOST RECENT materials, and
+      // remember how many older ones were dropped so the merged block can say
+      // so instead of quietly showing a subset.
+      if (box.items.length > MATERIAL_LIST_MAX) {
+        box.dropped = (box.dropped ?? 0) + (box.items.length - MATERIAL_LIST_MAX);
+        box.items = box.items.slice(-MATERIAL_LIST_MAX);
+      }
     } else {
       box.items.push({
         ...(text ? { text: text.slice(0, 2000) } : {}),
@@ -139,7 +156,7 @@ export class MaterialInbox {
     const firstMedia = box.items.find((item) => item.media)?.media;
     return {
       ...request,
-      text: materialTextBlock(box.items, request.text),
+      text: materialTextBlock(box.items, request.text, box.dropped ?? 0),
       media: request.media || firstMedia,
     };
   }

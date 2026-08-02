@@ -55,3 +55,42 @@ const audio = () => ({ type: "audio" as const, filePath: "/tmp/v.wav", mimeType:
 }
 
 console.log("material inbox multi-attachment tests passed");
+
+// ── accumulation across MESSAGES must stay reachable, and truncation visible ─
+{
+  const inbox = new MaterialInbox();
+  // Two messages of 9 attachments each: under the old fixed list of 8 the
+  // second batch was unreachable in the block meant to surface it.
+  for (const batch of ["p", "q"]) {
+    inbox.stash({
+      conversationId: "c3", text: "",
+      mediaItems: Array.from({ length: 9 }, (_, i) => img(`${batch}${i}`)),
+    } as never);
+  }
+  const body = String(inbox.mergeInto({ conversationId: "c3", text: "整理" } as never).text);
+  // The box ceiling keeps the most recent; everything it still holds is listed.
+  for (let i = 0; i < 9; i++) {
+    assert.ok(body.includes(`q${i}.jpg`), `most recent batch item q${i} must be reachable`);
+  }
+  // Nothing is presented as complete when it is not.
+  const held = (body.match(/\.jpg/g) ?? []).length;
+  assert.ok(held >= 9, `expected at least the latest batch, got ${held}`);
+}
+
+// ── exceeding the box ceiling must SAY so, not quietly show a subset ────────
+{
+  const inbox = new MaterialInbox();
+  for (let b = 0; b < 5; b++) {
+    inbox.stash({
+      conversationId: "c4", text: "",
+      mediaItems: Array.from({ length: 9 }, (_, i) => img(`b${b}n${i}`)),
+    } as never);
+  }
+  const body = String(inbox.mergeInto({ conversationId: "c4", text: "整理" } as never).text);
+  assert.ok(
+    body.includes("因超出缓存上限已丢弃"),
+    "an evicted material must be stated, never silently missing",
+  );
+}
+
+console.log("material inbox accumulation tests passed");
