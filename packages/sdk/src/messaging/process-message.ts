@@ -179,7 +179,9 @@ export async function processOneMessage(
         media = {
           type: "image",
           filePath: downloaded.decryptedPicPath,
-          mimeType: downloaded.picMediaType ?? "image/jpeg",
+          // picMediaType is always set when decryptedPicPath is: an image path
+          // only exists once the bytes were positively identified.
+          mimeType: downloaded.picMediaType ?? "application/octet-stream",
         };
       } else if (downloaded.decryptedVideoPath) {
         media = { type: "video", filePath: downloaded.decryptedVideoPath, mimeType: "video/mp4" };

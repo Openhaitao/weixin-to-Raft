@@ -64,11 +64,25 @@ export async function downloadMediaFromItem(
       // Sniff the real type: WeChat gives no filename and no content-type, so
       // passing undefined here made every image land as `.bin` — unreadable to
       // a model that only receives the path.
-      const picMime = sniffImageMime(buf) ?? "image/jpeg";
-      const saved = await saveMedia(buf, picMime, "inbound", WEIXIN_MEDIA_MAX_BYTES);
-      result.decryptedPicPath = saved.path;
-      result.picMediaType = picMime;
-      logger.debug(`${label} image saved: ${saved.path} (${picMime})`);
+      //
+      // An UNKNOWN buffer must stay unknown. Defaulting to image/jpeg would
+      // rename a PDF or a truncated download to `.jpg` and hand the model an
+      // image block it cannot decode — trading "I can't read this" for a
+      // confident lie. Unrecognised bytes are surfaced as a generic file, which
+      // is honest and still lets the model try to open it.
+      const picMime = sniffImageMime(buf);
+      if (picMime) {
+        const saved = await saveMedia(buf, picMime, "inbound", WEIXIN_MEDIA_MAX_BYTES);
+        result.decryptedPicPath = saved.path;
+        result.picMediaType = picMime;
+        logger.debug(`${label} image saved: ${saved.path} (${picMime})`);
+      } else {
+        const saved = await saveMedia(buf, undefined, "inbound", WEIXIN_MEDIA_MAX_BYTES);
+        result.decryptedFilePath = saved.path;
+        result.fileMediaType = "application/octet-stream";
+        logger.error(`${label} image bytes unrecognised (${buf.length}B) — delivered as generic file, not labelled as an image`);
+        errLog(`weixin ${label} image: unrecognised format, delivered as file`);
+      }
     } catch (err) {
       logger.error(`${label} image download/decrypt failed: ${String(err)}`);
       errLog(`weixin ${label} image download/decrypt failed: ${String(err)}`);

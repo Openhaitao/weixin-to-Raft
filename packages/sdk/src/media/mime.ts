@@ -27,6 +27,8 @@ const EXTENSION_TO_MIME: Record<string, string> = {
   ".gif": "image/gif",
   ".webp": "image/webp",
   ".bmp": "image/bmp",
+  ".heic": "image/heic",
+  ".heif": "image/heif",
 };
 
 const MIME_TO_EXTENSION: Record<string, string> = {
@@ -36,6 +38,8 @@ const MIME_TO_EXTENSION: Record<string, string> = {
   "image/gif": ".gif",
   "image/webp": ".webp",
   "image/bmp": ".bmp",
+  "image/heic": ".heic",
+  "image/heif": ".heif",
   "video/mp4": ".mp4",
   "video/quicktime": ".mov",
   "video/webm": ".webm",
