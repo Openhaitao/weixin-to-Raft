@@ -18,6 +18,7 @@ import { sendWeixinErrorNotice } from "./error-notice.js";
 import { sendWeixinMediaFile } from "./send-media.js";
 import { markdownToPlainText, sendMessageWeixin } from "./send.js";
 import { handleSlashCommand } from "./slash-commands.js";
+import { messageDeliveryId } from "../storage/delivery-ledger.js";
 
 const MEDIA_TEMP_DIR = path.join(os.tmpdir(), "weixin-agent/media");
 const firstMessageLoggedByAccount = new Set<string>();
@@ -174,11 +175,42 @@ export function findMediaItems(itemList?: MessageItem[]): {
   return { items: all.slice(0, MAX_MEDIA_ITEMS), candidateCount: all.length };
 }
 
+/**
+ * Outcome of handling one inbound message. Callers need this to decide whether
+ * the delivery may be committed as done: recording "handled" on arrival would
+ * suppress the server's redelivery of a message we in fact failed to answer,
+ * trading duplicates for silent loss.
+ */
+export type ProcessOutcome = {
+  /** The turn finished without needing the server to redeliver it. */
+  delivered: boolean;
+  /**
+   * The turn's effect survives a restart.
+   *
+   * A reply that was sent is durable — it is out of the process. Material
+   * stashed into the in-memory inbox is NOT: after a restart the material is
+   * gone, so if the message had been committed to the persistent ledger the
+   * server's redelivery would be suppressed and the material would be lost
+   * with no reply ever sent. A de-dup record must not outlive the effect it
+   * protects.
+   */
+  durable: boolean;
+  /** Earlier messages this turn made durable (consumed material). */
+  commitIds: string[];
+};
+
+/** Shown when the agent returns neither text nor media. */
+export const EMPTY_RESPONSE_NOTICE =
+  "这条我没能生成回复，麻烦你换个说法再发一次。";
+
 export async function processOneMessage(
   full: WeixinMessage,
   deps: ProcessMessageDeps,
-): Promise<void> {
+): Promise<ProcessOutcome> {
   const receivedAt = Date.now();
+  let delivered = false;
+  let durable = false;
+  let commitIds: string[] = [];
   if (!firstMessageLoggedByAccount.has(deps.accountId)) {
     firstMessageLoggedByAccount.add(deps.accountId);
     const sidecarReadyAt = Number(process.env.WEIXIN_AGENT_SIDECAR_READY_AT);
@@ -213,7 +245,12 @@ export async function processOneMessage(
       receivedAt,
       full.create_time_ms,
     );
-    if (slashResult.handled) return;
+    // Only a confirmed send counts. A command that failed AND failed to report
+    // the failure has told the user nothing, so it must stay redeliverable.
+    // A slash reply is out of the process once sent, so delivered ⇒ durable.
+    if (slashResult.handled) {
+      return { delivered: slashResult.replied, durable: slashResult.replied, commitIds: [] };
+    }
   }
 
   // --- Store context token ---
@@ -274,6 +311,7 @@ export async function processOneMessage(
   // --- Build ChatRequest ---
   const request: ChatRequest = {
     conversationId: full.from_user_id ?? "",
+    deliveryId: messageDeliveryId(full),
     text: `${bodyFromItemList(full.item_list)}${missingNotice}`,
     timing: { receivedAt },
     // `media` stays the first attachment for legacy agents; `mediaItems`
@@ -337,14 +375,50 @@ export async function processOneMessage(
           opts: { baseUrl: deps.baseUrl, token: deps.token, contextToken },
         });
       }
+      delivered = true;
+      durable = true;
     } else if (response.text) {
       await sendMessageWeixin({
         to,
         text: markdownToPlainText(response.text),
         opts: { baseUrl: deps.baseUrl, token: deps.token, contextToken },
       });
+      delivered = true;
+      durable = true;
+    } else if (response.silent) {
+      // Handled with no reply owed — but the effect (stashed material) lives
+      // only in memory, so this must NOT be written to the persistent ledger.
+      delivered = true;
+      durable = false;
+    } else {
+      // The agent produced nothing to send. Staying undelivered would just have
+      // the server redeliver a message that deterministically produces nothing
+      // again, so say so once and treat that notice as the delivery.
+      await sendMessageWeixin({
+        to,
+        text: EMPTY_RESPONSE_NOTICE,
+        opts: { baseUrl: deps.baseUrl, token: deps.token, contextToken },
+      });
+      delivered = true;
+      durable = true;
+    }
+    // The reply is out. Only now may the material that produced it be given
+    // up, and only now may those earlier messages be retired durably.
+    if (durable) {
+      commitIds = response.consumedDeliveryIds ?? [];
+      if (commitIds.length) {
+        try {
+          await deps.agent.confirmConsumed?.(request.conversationId, commitIds);
+        } catch (err) {
+          // Holding material too long only costs a stale merge; dropping it
+          // costs the user's photo. Keep it and let the TTL expire it.
+          logger.error(`processOneMessage: confirmConsumed failed: ${String(err)}`);
+        }
+      }
     }
   } catch (err) {
+    // delivered stays false: the server's redelivery is the user's only second
+    // chance, so this message must NOT be committed as handled.
     logger.error(`processOneMessage: agent or send failed: ${err instanceof Error ? err.stack ?? err.message : JSON.stringify(err)}`);
     void sendWeixinErrorNotice({
       to,
@@ -369,4 +443,5 @@ export async function processOneMessage(
       }).catch(() => {});
     }
   }
+  return { delivered, durable, commitIds };
 }

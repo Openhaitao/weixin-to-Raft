@@ -53,7 +53,7 @@ async function testMenuAndNumericFollowup(): Promise<void> {
 
   assert.deepEqual(
     await handleSlashCommand("/model", ctx, Date.now(), undefined, registry),
-    { handled: true },
+    { handled: true, replied: true },
   );
   // New one-line style: "1. Sol ✓ — <blurb>（当前）"; unknown ids fall back
   // to the advertised description as the blurb.
@@ -63,11 +63,11 @@ async function testMenuAndNumericFollowup(): Promise<void> {
 
   assert.deepEqual(
     await handleSlashCommand("先问个别的问题", ctx, Date.now(), undefined, registry),
-    { handled: false },
+    { handled: false, replied: false },
   );
   assert.deepEqual(
     await handleSlashCommand("2", ctx, Date.now(), undefined, registry),
-    { handled: true },
+    { handled: true, replied: true },
   );
   assert.deepEqual(selected, ["gpt-5.6-terra"]);
 }
@@ -83,7 +83,7 @@ async function testAccountAndConversationIsolation(): Promise<void> {
   await handleSlashCommand("/model", botA, Date.now(), undefined, registry);
   assert.deepEqual(
     await handleSlashCommand("3", botB, Date.now(), undefined, registry),
-    { handled: false },
+    { handled: false, replied: false },
   );
   await handleSlashCommand("3", botA, Date.now(), undefined, registry);
   assert.deepEqual(selectedA, ["gpt-5.6-luna"]);
@@ -101,14 +101,14 @@ async function testTtlAndClearCompatibility(): Promise<void> {
   now += 101;
   assert.deepEqual(
     await handleSlashCommand("1", ctx, now, undefined, registry),
-    { handled: false },
+    { handled: false, replied: false },
   );
 
   await handleSlashCommand("/model", ctx, now, undefined, registry);
   await handleSlashCommand("/new", ctx, now, undefined, registry);
   assert.deepEqual(
     await handleSlashCommand("1", ctx, now, undefined, registry),
-    { handled: false },
+    { handled: false, replied: false },
   );
   assert.deepEqual(selected, []);
 }

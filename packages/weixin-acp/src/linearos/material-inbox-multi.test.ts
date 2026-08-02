@@ -18,7 +18,14 @@ const audio = () => ({ type: "audio" as const, filePath: "/tmp/v.wav", mimeType:
     mediaItems: [img("a"), img("b"), img("c")],
   } as never);
   const merged = inbox.mergeInto({ conversationId: "c1", text: "对比一下" } as never);
-  const body = String(merged.text);
+  const body = String(merged.request.text);
+  // Listing the attachments is not enough — they must actually ride along, or
+  // the model is told about three photos and shown one.
+  assert.equal(
+    merged.request.mediaItems?.length,
+    3,
+    "every stashed attachment must be carried into the merged request",
+  );
   const ia = body.indexOf("a.jpg"), ib = body.indexOf("b.jpg"), ic = body.indexOf("c.jpg");
   assert.ok(ia >= 0 && ib >= 0 && ic >= 0, "all three attachments must be listed");
   assert.ok(ia < ib && ib < ic, `order must be a,b,c — got a@${ia} b@${ib} c@${ic}`);
@@ -48,7 +55,7 @@ const audio = () => ({ type: "audio" as const, filePath: "/tmp/v.wav", mimeType:
     conversationId: "c2", text: "",
     mediaItems: Array.from({ length: 9 }, (_, i) => img(`n${i}`)),
   } as never);
-  const body = String(inbox.mergeInto({ conversationId: "c2", text: "整理" } as never).text);
+  const body = String(inbox.mergeInto({ conversationId: "c2", text: "整理" } as never).request.text);
   for (let i = 0; i < 9; i++) {
     assert.ok(body.includes(`n${i}.jpg`), `attachment n${i} must be reachable in the merged block`);
   }
@@ -67,7 +74,7 @@ console.log("material inbox multi-attachment tests passed");
       mediaItems: Array.from({ length: 9 }, (_, i) => img(`${batch}${i}`)),
     } as never);
   }
-  const body = String(inbox.mergeInto({ conversationId: "c3", text: "整理" } as never).text);
+  const body = String(inbox.mergeInto({ conversationId: "c3", text: "整理" } as never).request.text);
   // The box ceiling keeps the most recent; everything it still holds is listed.
   for (let i = 0; i < 9; i++) {
     assert.ok(body.includes(`q${i}.jpg`), `most recent batch item q${i} must be reachable`);
@@ -86,7 +93,7 @@ console.log("material inbox multi-attachment tests passed");
       mediaItems: Array.from({ length: 9 }, (_, i) => img(`b${b}n${i}`)),
     } as never);
   }
-  const body = String(inbox.mergeInto({ conversationId: "c4", text: "整理" } as never).text);
+  const body = String(inbox.mergeInto({ conversationId: "c4", text: "整理" } as never).request.text);
   assert.ok(
     body.includes("因超出缓存上限已丢弃"),
     "an evicted material must be stated, never silently missing",
@@ -103,7 +110,7 @@ console.log("material inbox accumulation tests passed");
   for (let i = 0; i < 60; i++) {
     inbox.stash({ conversationId: "c5", text: `https://example.com/doc/${i}` } as never);
   }
-  const body = String(inbox.mergeInto({ conversationId: "c5", text: "整理" } as never).text);
+  const body = String(inbox.mergeInto({ conversationId: "c5", text: "整理" } as never).request.text);
   assert.ok(body.includes("因超出缓存上限已丢弃"), "eviction must be stated for link-only materials too");
   // Most recent retained.
   assert.ok(body.includes("doc/59"), "the newest link must be retained");

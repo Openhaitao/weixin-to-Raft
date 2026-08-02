@@ -7,6 +7,13 @@
  */
 
 export interface Agent {
+  /**
+   * Called after a turn's reply is confirmed sent, with the earlier messages
+   * whose material that turn consumed. Until this runs the material is still
+   * held, so a failed send can be retried with it intact.
+   */
+  confirmConsumed?(conversationId: string, deliveryIds: string[]): void | Promise<void>;
+
   /** Process a single message and return a reply. */
   chat(request: ChatRequest): Promise<ChatResponse>;
   /** Optional fast preflight for whether this inbound message should show a typing indicator. */
@@ -36,6 +43,13 @@ export interface AgentModelSelection {
 }
 
 export interface ChatRequest {
+  /**
+   * Ledger identity of the message that produced this request, when it has
+   * one. Carried so an effect that OUTLIVES the request (material stashed for
+   * a later command) can be committed durably at the moment it becomes durable.
+   */
+  deliveryId?: string;
+
   /** Conversation / user identifier. Use this to maintain per-user context. */
   conversationId: string;
   /** Text content of the message. */
@@ -84,6 +98,20 @@ export function normalizeChatMedia(
 }
 
 export interface ChatResponse {
+  /**
+   * Deliberate silence: the turn was handled and no reply is owed (material
+   * stashed for a later command). Distinct from an empty response, which means
+   * the agent failed to produce anything and the user IS owed an explanation.
+   */
+  silent?: boolean;
+
+  /**
+   * Earlier messages whose effect this turn just made durable — stashed
+   * material that has now been consumed and answered. They may be committed
+   * only once this turn's reply is confirmed sent.
+   */
+  consumedDeliveryIds?: string[];
+
   /** Reply text (may contain markdown — will be converted to plain text before sending). */
   text?: string;
   /** Reply media file. */

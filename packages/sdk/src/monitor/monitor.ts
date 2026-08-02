@@ -4,6 +4,7 @@ import { WeixinConfigManager } from "../api/config-cache.js";
 import { SESSION_EXPIRED_ERRCODE, pauseSession, getRemainingPauseMs } from "../api/session-guard.js";
 import { processOneMessage } from "../messaging/process-message.js";
 import { getSyncBufFilePath, loadGetUpdatesBuf, saveGetUpdatesBuf } from "../storage/sync-buf.js";
+import { DeliveryLedger, getDeliveryLedgerPath, messageDeliveryId } from "../storage/delivery-ledger.js";
 import { logger } from "../util/logger.js";
 import { redactBody } from "../util/redact.js";
 
@@ -34,6 +35,12 @@ export type MonitorWeixinOpts = {
   abortSignal?: AbortSignal;
   longPollTimeoutMs?: number;
   log?: (msg: string) => void;
+  /** Test seams. Production leaves these undefined and uses the real
+   * implementations; without them this loop cannot be driven at all, so a
+   * wiring defect could only ever be found in production. */
+  __getUpdatesForTest?: typeof getUpdates;
+  __processOneMessageForTest?: typeof processOneMessage;
+  __ledgerPathForTest?: string;
 };
 
 /**
@@ -50,6 +57,8 @@ export async function monitorWeixinProvider(opts: MonitorWeixinOpts): Promise<vo
     abortSignal,
     longPollTimeoutMs,
   } = opts;
+  const doGetUpdates = opts.__getUpdatesForTest ?? getUpdates;
+  const doProcessOneMessage = opts.__processOneMessageForTest ?? processOneMessage;
   const log = opts.log ?? ((msg: string) => console.log(msg));
   const errLog = (msg: string) => {
     log(msg);
@@ -62,6 +71,9 @@ export async function monitorWeixinProvider(opts: MonitorWeixinOpts): Promise<vo
 
   const syncFilePath = getSyncBufFilePath(accountId);
   const previousGetUpdatesBuf = loadGetUpdatesBuf(syncFilePath);
+  // Survives restarts: the duplicate we actually hit came from a fresh process
+  // re-answering what the previous one had already answered.
+  const ledger = new DeliveryLedger(opts.__ledgerPathForTest ?? getDeliveryLedgerPath(syncFilePath));
   let getUpdatesBuf = previousGetUpdatesBuf ?? "";
 
   if (previousGetUpdatesBuf) {
@@ -77,7 +89,7 @@ export async function monitorWeixinProvider(opts: MonitorWeixinOpts): Promise<vo
 
   while (!abortSignal?.aborted) {
     try {
-      const resp = await getUpdates({
+      const resp = await doGetUpdates({
         baseUrl,
         token,
         get_updates_buf: getUpdatesBuf,
@@ -131,6 +143,11 @@ export async function monitorWeixinProvider(opts: MonitorWeixinOpts): Promise<vo
 
       const list = resp.msgs ?? [];
       for (const full of list) {
+        // Skip only what a PREVIOUS successful handling already committed.
+        if (ledger.has(full)) {
+          aLog.info(`skip already-handled delivery id=${messageDeliveryId(full)}`);
+          continue;
+        }
         aLog.info(
           `inbound: from=${full.from_user_id} types=${full.item_list?.map((i) => i.type).join(",") ?? "none"}`,
         );
@@ -138,7 +155,7 @@ export async function monitorWeixinProvider(opts: MonitorWeixinOpts): Promise<vo
         const fromUserId = full.from_user_id ?? "";
         const cachedConfig = await configManager.getForUser(fromUserId, full.context_token);
 
-        await processOneMessage(full, {
+        const outcome = await doProcessOneMessage(full, {
           accountId,
           agent,
           baseUrl,
@@ -148,6 +165,19 @@ export async function monitorWeixinProvider(opts: MonitorWeixinOpts): Promise<vo
           log,
           errLog,
         });
+        // Commit ONLY on success: a failed turn must stay eligible for the
+        // server's redelivery, which is the user's one remaining chance.
+        if (outcome.durable) {
+          ledger.commit(full);
+          // Material this turn consumed is durable now that the reply is out,
+          // so those earlier messages retire with it and cannot come back as
+          // pending material after a restart.
+          for (const id of outcome.commitIds) ledger.commitId(id);
+        }
+        // A turn whose only effect was an in-memory stash is deliberately NOT
+        // recorded: the ledger outliving the material is exactly how a message
+        // gets swallowed. A re-serve is absorbed by the inbox's own dedupe,
+        // which shares the material's lifetime.
       }
     } catch (err) {
       if (abortSignal?.aborted) {

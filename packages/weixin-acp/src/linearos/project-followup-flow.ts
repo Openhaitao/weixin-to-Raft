@@ -49,9 +49,14 @@ type FlowRoute =
 /** The slice of MaterialInbox the flow needs: material stashed BEFORE the command
  * (bare link/file, silently cached) must be visible to /项目跟进, mirroring the
  * Feishu adapter's merge-before-intent ordering. */
+/** Material may only be retired once the turn's reply is confirmed sent. */
+function withConsumed(response: ChatResponse, ids: string[]): ChatResponse {
+  return ids.length ? { ...response, consumedDeliveryIds: ids } : response;
+}
+
 type MaterialInboxLike = {
   has(conversationId: string): boolean;
-  mergeInto(request: ChatRequest): ChatRequest;
+  mergeInto(request: ChatRequest): { request: ChatRequest; consumedDeliveryIds: string[] };
   stash(request: ChatRequest): void;
 };
 
@@ -296,7 +301,8 @@ export class WechatProjectFollowupFlow {
       // command counts as this command's material (keyword still derives from the
       // original command text, not the merged block).
       const merged = this.mergeInboxMaterial(request, options);
-      if (!hasConcreteMaterial(merged) && !followupCommandTail(text)) {
+      const mergedRequest = merged.request;
+      if (!hasConcreteMaterial(mergedRequest) && !followupCommandTail(text)) {
         this.states.set(request.conversationId, { phase: "awaiting_material", hint: "", updatedAt: Date.now() });
         await this.save();
         return {
@@ -304,7 +310,10 @@ export class WechatProjectFollowupFlow {
           response: { text: "收到，开始项目跟进。把这次的会议纪要链接、文档或材料发我（可以带项目名，如 `/项目跟进 星海科技 + 链接`）。" },
         };
       }
-      return { handled: true, response: await this.startStage1(merged, text) };
+      return {
+        handled: true,
+        response: withConsumed(await this.startStage1(mergedRequest, text), merged.consumedDeliveryIds),
+      };
     }
 
     if (!existing) {
@@ -320,10 +329,14 @@ export class WechatProjectFollowupFlow {
         return { handled: true, response: { text: "已取消这次项目跟进。" } };
       }
       const merged = this.mergeInboxMaterial(request, options);
-      if (!hasConcreteMaterial(merged) && !text) {
+      const mergedRequest = merged.request;
+      if (!hasConcreteMaterial(mergedRequest) && !text) {
         return { handled: true, response: { text: "把这次的会议纪要链接、文档或材料发我就行。" } };
       }
-      return { handled: true, response: await this.startStage1(merged, text) };
+      return {
+        handled: true,
+        response: withConsumed(await this.startStage1(mergedRequest, text), merged.consumedDeliveryIds),
+      };
     }
 
     if (existing.phase === "choosing") {
@@ -374,27 +387,45 @@ export class WechatProjectFollowupFlow {
     });
     if (entry.kind === "route") {
       let effective: ChatRequest = { ...request, text: entry.normalizedText };
-      if (inboxHas && options.materialInbox) effective = options.materialInbox.mergeInto(effective);
-      return { handled: true, response: await this.startStage1(effective, entry.normalizedText) };
+      let consumed: string[] = [];
+      if (inboxHas && options.materialInbox) {
+        const merged = options.materialInbox.mergeInto(effective);
+        effective = merged.request;
+        consumed = merged.consumedDeliveryIds;
+      }
+      return {
+        handled: true,
+        response: withConsumed(await this.startStage1(effective, entry.normalizedText), consumed),
+      };
     }
     if (entry.kind === "clarify") {
       const asked = this.clarifyAskedAt.get(request.conversationId) || 0;
       if (Date.now() - asked < CLARIFY_ONCE_TTL_MS) return null;
       this.clarifyAskedAt.set(request.conversationId, Date.now());
-      if (request.media || hasConcreteMaterial(request)) options.materialInbox?.stash(request);
+      // Deliberately does NOT stash, and no longer says the material is kept.
+      //
+      // This turn's reply is durable — once sent, the message is committed and
+      // the server will not redeliver it. A stash is in-memory, so a restart
+      // between the two would leave the promise on the user's screen and the
+      // material gone for good. One turn cannot hold a durable effect and a
+      // volatile one and still be honest about either, so we stop promising
+      // what the storage cannot back and ask for the material inside the flow.
       return {
         handled: true,
         response: {
-          text: "看起来你想做项目跟进？回复 `/项目跟进 项目名` 我就开始（刚发的材料我已收好，会一起带上）；如果不是要跟进，直接继续说你的需求即可。",
+          text: "看起来你想做项目跟进？回复 `/项目跟进 项目名` 我就开始，开始后把材料再发我一次；如果不是要跟进，直接继续说你的需求即可。",
         },
       };
     }
     return null;
   }
 
-  private mergeInboxMaterial(request: ChatRequest, options: BeforeAgentOptions): ChatRequest {
-    if (hasConcreteMaterial(request)) return request;
-    if (!options.materialInbox?.has(request.conversationId)) return request;
+  private mergeInboxMaterial(
+    request: ChatRequest,
+    options: BeforeAgentOptions,
+  ): { request: ChatRequest; consumedDeliveryIds: string[] } {
+    if (hasConcreteMaterial(request)) return { request, consumedDeliveryIds: [] };
+    if (!options.materialInbox?.has(request.conversationId)) return { request, consumedDeliveryIds: [] };
     return options.materialInbox.mergeInto(request);
   }
 

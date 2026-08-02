@@ -104,6 +104,10 @@ export class AcpAgent implements Agent {
     return true;
   }
 
+  async confirmConsumed(conversationId: string, deliveryIds: string[]): Promise<void> {
+    this.materialInbox.consume(conversationId, deliveryIds);
+  }
+
   async chat(request: ChatRequest): Promise<ChatResponse> {
     // Followup routes first: its command/state must win over the create flow's
     // awaiting_material state (which would otherwise swallow /项目跟进 as material).
@@ -121,18 +125,39 @@ export class AcpAgent implements Agent {
     request = routed.request;
 
     if (isBareMaterialRequest(request)) {
-      this.materialInbox.stash(request);
-      log(`material inbox stashed conversation=${request.conversationId} media=${request.media?.type || "text"}`);
-      return {};
+      // Claim material ONLY when a flow is actually waiting for it. This used
+      // to claim on shape alone — any photo, file or link with no caption was
+      // swallowed and answered with nothing, whether or not anyone was waiting
+      // for it. That is the "sometimes it just doesn't reply" people report: a
+      // message is not a flow's material because of what it contains, only
+      // because the conversation is in a state that asked for it.
+      const awaiting = (await this.projectCreateFlow.isAwaitingMaterial(request.conversationId))
+        || (await this.projectFollowupFlow.isAwaitingMaterial(request.conversationId));
+      if (awaiting) {
+        this.materialInbox.stash(request);
+        log(`material inbox stashed conversation=${request.conversationId} media=${request.media?.type || "text"}`);
+        // Silent on purpose: the material waits for the command that will use it.
+        return { silent: true };
+      }
+      // Otherwise it is an ordinary message and gets an ordinary answer.
     }
 
     let mergedMaterial = false;
+    // Messages whose stashed material this turn is about to consume. They are
+    // only safe to retire once this turn's reply is actually delivered.
+    let consumedDeliveryIds: string[] = [];
     if (this.materialInbox.has(request.conversationId)) {
       if (isMaterialInboxCancelText(request.text)) {
-        this.materialInbox.clear(request.conversationId);
-        log(`material inbox cleared conversation=${request.conversationId}`);
+        // Retire on confirmed delivery, not here: clearing first meant a failed
+        // send threw the material away and left nothing to retry with.
+        consumedDeliveryIds = (this.materialInbox.peek(request.conversationId)?.items ?? [])
+          .map((item) => item.deliveryId)
+          .filter((id): id is string => !!id);
+        log(`material inbox cancel pending conversation=${request.conversationId}`);
       } else {
-        request = this.materialInbox.mergeInto(request);
+        const merged = this.materialInbox.mergeInto(request);
+        request = merged.request;
+        consumedDeliveryIds = merged.consumedDeliveryIds;
         mergedMaterial = true;
         log(`material inbox merged conversation=${request.conversationId}`);
       }
@@ -141,7 +166,7 @@ export class AcpAgent implements Agent {
     if (mergedMaterial) {
       const rerouted = await this.projectCreateFlow.beforeAgent(request, { allowNaturalProjectCreate: true });
       if (rerouted.handled) {
-        return rerouted.response;
+        return { ...rerouted.response, consumedDeliveryIds };
       }
       request = rerouted.request;
     }
@@ -218,7 +243,7 @@ export class AcpAgent implements Agent {
       };
     }
     log(`response: ${response.text?.slice(0, 80) ?? "[no text]"}${response.media ? " +media" : ""}`);
-    return response;
+    return consumedDeliveryIds.length ? { ...response, consumedDeliveryIds } : response;
   }
 
   /** Drive the followup flow's deterministic model turns: stage-2 analysis after a

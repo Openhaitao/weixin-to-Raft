@@ -262,7 +262,7 @@ async function testMaterialFirstThenCommandConsumesInbox(): Promise<void> {
   const { MaterialInbox } = await import("./material-inbox.ts");
   const inbox = new MaterialInbox();
   const conversationId = "wx-conv-inbox";
-  inbox.stash(req(MINUTE_LINK, conversationId));
+  inbox.stash({ ...req(MINUTE_LINK, conversationId), deliveryId: "m:bare-1" } as never);
 
   const flow = new WechatProjectFollowupFlow();
   setSearchFixture({ ok: true, keyword: "星海科技", matches: [{ id: "p-100", name: "星海科技" }], autoPick: "p-100" });
@@ -275,7 +275,21 @@ async function testMaterialFirstThenCommandConsumesInbox(): Promise<void> {
     /已锁定投资云项目「星海科技」/,
     "stashed bare material must count as this command's material (no re-send ask)",
   );
-  assert.equal(inbox.has(conversationId), false, "inbox material must be consumed by the merge");
+  // The merge REPORTS what it used; it does not give it up yet. Consuming at
+  // merge time meant a failed send threw the material away and the retry
+  // carried nothing, so the box is held until delivery is confirmed.
+  assert.deepEqual(
+    routed.handled ? routed.response.consumedDeliveryIds ?? [] : [],
+    ["m:bare-1"],
+    "the merge must report the material it consumed so it can be retired on delivery",
+  );
+  assert.equal(
+    inbox.has(conversationId),
+    true,
+    "material stays held until the reply is confirmed sent",
+  );
+  inbox.consume(conversationId, ["m:bare-1"]);
+  assert.equal(inbox.has(conversationId), false, "confirmed delivery retires it");
   assert.equal(await flow.isAwaitingMaterial(conversationId), false);
 
   const prompt = flow.takePendingModelPrompt(conversationId);
@@ -288,7 +302,7 @@ async function testNaturalStrongPhraseRoutesWithInboxMaterial(): Promise<void> {
   const { MaterialInbox } = await import("./material-inbox.ts");
   const inbox = new MaterialInbox();
   const conversationId = "wx-conv-nl-route";
-  inbox.stash(req(MINUTE_LINK, conversationId));
+  inbox.stash({ ...req(MINUTE_LINK, conversationId), deliveryId: "m:nl-1" } as never);
 
   const flow = new WechatProjectFollowupFlow();
   setSearchFixture({ ok: true, keyword: "星海科技", matches: [{ id: "p-100", name: "星海科技" }], autoPick: "p-100" });
@@ -302,7 +316,15 @@ async function testNaturalStrongPhraseRoutesWithInboxMaterial(): Promise<void> {
     /已锁定投资云项目「星海科技」/,
     "NL route + fetched material title must lock the project",
   );
-  assert.equal(inbox.has(conversationId), false, "inbox material must be consumed by the NL route");
+  // Reported now, retired on confirmed delivery — see the command-route test.
+  assert.deepEqual(
+    routed.handled ? routed.response.consumedDeliveryIds ?? [] : [],
+    ["m:nl-1"],
+    "the NL route must report the material it consumed",
+  );
+  assert.equal(inbox.has(conversationId), true, "material stays held until the reply lands");
+  inbox.consume(conversationId, ["m:nl-1"]);
+  assert.equal(inbox.has(conversationId), false, "confirmed delivery retires it");
   const prompt = flow.takePendingModelPrompt(conversationId);
   assert.ok(prompt && prompt.includes("p-100"));
   delete process.env.WEIXIN_AGENT_FEISHU_TITLE_JSON;

@@ -19,6 +19,10 @@ interface MaterialItem {
   text?: string;
   media?: Media;
   ts: number;
+  /** The message this material came from, so consuming it can retire that
+   * message durably. Without this, a consumed photo is re-served after a
+   * restart and resurfaces as pending material for an unrelated question. */
+  deliveryId?: string;
 }
 
 interface MaterialBox {
@@ -69,7 +73,7 @@ function materialMediaLine(media: Media, index: number): string {
   ].join(" · ");
 }
 
-function materialTextBlock(items: MaterialItem[], triggerText: string, dropped = 0): string {
+function materialTextBlock(items: MaterialItem[], triggerText: string, dropped = 0, overflow = 0): string {
   const lines: string[] = [];
   // The box is already bounded at stash time, so everything held is listed —
   // showing a subset here would recreate the vanishing-attachment bug.
@@ -87,6 +91,9 @@ function materialTextBlock(items: MaterialItem[], triggerText: string, dropped =
     `用户刚才连续发送了 ${items.length} 个材料，系统已静默缓存，没有单独回复。现在这句话才是触发意图。`,
     ...(dropped > 0
       ? [`注意：更早的 ${dropped} 个材料因超出缓存上限已丢弃，不要假设它们的内容。`]
+      : []),
+    ...(overflow > 0
+      ? [`注意：本轮只随附了前 ${MAX_MEDIA_ITEMS} 个附件，另有 ${overflow} 个未随附，不要假设它们的内容。`]
       : []),
     "材料清单：",
     ...(lines.length ? lines : ["（材料已缓存）"]),
@@ -108,6 +115,17 @@ export class MaterialInbox {
 
   stash(request: ChatRequest): void {
     const now = Date.now();
+    // The server re-serves a batch when its buffer comes back empty, so the
+    // same message can arrive twice. Dedupe here rather than in the poll loop:
+    // the box and the record then have the same lifetime, so a restart drops
+    // both together and the redelivery correctly re-stashes exactly once.
+    if (request.deliveryId) {
+      const existing = this.boxes.get(request.conversationId);
+      if (existing && now - existing.ts <= MATERIAL_TTL_MS
+        && existing.items.some((item) => item.deliveryId === request.deliveryId)) {
+        return;
+      }
+    }
     const prev = this.boxes.get(request.conversationId);
     const box = prev && now - prev.ts <= MATERIAL_TTL_MS
       ? prev
@@ -124,6 +142,7 @@ export class MaterialInbox {
           ...(i === 0 && text ? { text: text.slice(0, 2000) } : {}),
           media,
           ts: now,
+          ...(request.deliveryId ? { deliveryId: request.deliveryId } : {}),
         });
       });
 
@@ -131,6 +150,7 @@ export class MaterialInbox {
       box.items.push({
         ...(text ? { text: text.slice(0, 2000) } : {}),
         ts: now,
+        ...(request.deliveryId ? { deliveryId: request.deliveryId } : {}),
       });
     }
 
@@ -146,21 +166,60 @@ export class MaterialInbox {
     this.boxes.set(request.conversationId, box);
   }
 
-  take(conversationId: string): MaterialBox | null {
+  /** Read without removing. Material is only given up once a reply lands. */
+  peek(conversationId: string): MaterialBox | null {
     if (!this.has(conversationId)) return null;
-    const box = this.boxes.get(conversationId) || null;
-    this.boxes.delete(conversationId);
-    return box;
+    return this.boxes.get(conversationId) || null;
   }
 
-  mergeInto(request: ChatRequest): ChatRequest {
-    const box = this.take(request.conversationId);
-    if (!box) return request;
-    const firstMedia = box.items.find((item) => item.media)?.media;
+  /**
+   * Retire material whose turn has now been answered.
+   *
+   * Removing it at merge time lost it whenever the send failed: the retry
+   * carried no material, and the user's photo was gone with nothing said. The
+   * box is therefore held until delivery is confirmed.
+   */
+  consume(conversationId: string, deliveryIds: string[]): void {
+    const box = this.boxes.get(conversationId);
+    if (!box) return;
+    if (!deliveryIds.length) { this.boxes.delete(conversationId); return; }
+    const retired = new Set(deliveryIds);
+    box.items = box.items.filter((item) => !item.deliveryId || !retired.has(item.deliveryId));
+    if (!box.items.length) this.boxes.delete(conversationId);
+  }
+
+  /**
+   * Fold the stashed material into this request.
+   *
+   * Every stashed attachment is carried, not just the first: the block used to
+   * LIST n materials in text while attaching only one, so the model was told
+   * about two photos and shown one — the same vanishing-attachment bug the
+   * text block warns about, one layer down.
+   *
+   * `consumedDeliveryIds` are the messages whose material this request now
+   * carries. They become durable only when this turn's reply is sent.
+   */
+  mergeInto(request: ChatRequest): { request: ChatRequest; consumedDeliveryIds: string[] } {
+    const box = this.peek(request.conversationId);
+    if (!box) return { request, consumedDeliveryIds: [] };
+
+    const stashed = box.items.map((item) => item.media).filter(isMaterialMedia);
+    const carried = [...normalizeChatMedia(request), ...stashed];
+    const overflow = Math.max(0, carried.length - MAX_MEDIA_ITEMS);
+    const mediaItems = carried.slice(0, MAX_MEDIA_ITEMS);
+
+    const consumedDeliveryIds = [
+      ...new Set(box.items.map((item) => item.deliveryId).filter((id): id is string => !!id)),
+    ];
+
     return {
-      ...request,
-      text: materialTextBlock(box.items, request.text, box.dropped ?? 0),
-      media: request.media || firstMedia,
+      request: {
+        ...request,
+        text: materialTextBlock(box.items, request.text, box.dropped ?? 0, overflow),
+        media: mediaItems[0],
+        mediaItems,
+      },
+      consumedDeliveryIds,
     };
   }
 
