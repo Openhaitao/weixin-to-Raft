@@ -2,13 +2,62 @@
 
 > 本项目非微信官方项目，代码由 [@tencent-weixin/openclaw-weixin](https://npmx.dev/package/@tencent-weixin/openclaw-weixin) 改造而来，仅供学习交流使用。
 
-微信 AI Agent 桥接框架 —— 通过简单的 Agent 接口，将任意 AI 后端接入微信。
+用微信连接你的 AI Agent。核心场景：**把微信接入 [Raft](https://raft.build) 多 agent 协作平台** —— 在微信里直接和你 Raft 服务器上的任意 agent 对话，随时用 `/agent` 切换对象；也可以用底层 SDK 把任意 AI 后端接进微信。
+
+## 微信 ↔ Raft
+
+```text
+你的微信
+  ↕ weixin-agent-sdk（扫码绑定、长轮询收发，无需公网服务器）
+weixin-raft（路由、/agent 菜单、同步等待、去重、重启恢复）
+  ↕ raft CLI（专用 External Agent 身份）
+Raft 服务器上的任意 agent
+```
+
+体验上就是一场普通的微信对话：
+
+- 直接发文字 → 交给当前选中的 agent。等待期间显示「正在输入…」，回答在时限内
+  （默认 90 秒）直接作为回复出现，没有任何转接提示和前缀。
+- `/agent` → 实时列出服务器上全部在线 agent，回复编号或 `/agent 名字` 切换；
+  新上线的 agent 自动出现在菜单里，无需改配置。
+- 慢任务超时后给出一句明确说明，回答完成后自动补送并标注 `来自 @xxx`。
+
+### 快速开始
+
+1. **创建桥接身份**：在 Raft 侧边栏 agents 区点 **+** → **Create External Agent**
+   （不要选普通 agent——桥接进程自己就是它的运行时）。
+2. **登录**：按新 agent 的 External Setup 卡片执行
+   `raft agent login --server <url> --agent <id> --profile-slug wechat-bridge`，
+   在浏览器批准一次。
+3. **绑定微信并启动**：
+
+```bash
+export RAFT_PROFILE=wechat-bridge
+export WEIXIN_RAFT_DEFAULT_AGENT=code   # 默认对话的 agent
+
+pnpm install && pnpm -r run build
+pnpm --filter weixin-raft exec tsx main.ts doctor   # 校验身份与默认 agent
+pnpm --filter weixin-raft exec tsx main.ts login    # 微信扫码绑定
+pnpm --filter weixin-raft exec tsx main.ts start    # 启动双向桥接
+```
+
+生产环境建议用 launchd/systemd 常驻。完整环境变量、可靠性语义（磁盘队列、
+按消息去重、重启恢复、草稿保护）和身份边界见
+[`packages/weixin-raft/README.md`](packages/weixin-raft/README.md)。
+
+### 设计边界
+
+- 桥使用专用 Raft External Agent 身份，微信消息进入 Raft 时明确标注来源，
+  **不伪装任何人类账号**；缺少 `RAFT_PROFILE` 时拒绝启动，不回落到环境身份。
+- 只有 agent 自己 DM 里的顶层回复会转回微信；频道消息、线程、人类消息一律不出境。
+- Raft → 微信方向持久化到磁盘队列：发送失败保留重试，按消息 id 去重，重启不重发。
 
 ## 项目结构
 
 ```
 packages/
   sdk/                  weixin-agent-sdk —— 微信桥接 SDK
+  weixin-raft/          微信 ↔ Raft 路由桥（本仓库的核心应用）
   weixin-acp/           ACP (Agent Client Protocol) 适配器
   example-openai/       基于 OpenAI 的示例
 ```
@@ -16,7 +65,6 @@ packages/
 ## 通过 ACP 接入 Claude Code, Codex, kimi-cli 等 Agent
 
 [ACP (Agent Client Protocol)](https://agentclientprotocol.com/) 是一个开放的 Agent 通信协议。如果你已有兼容 ACP 的 agent，可以直接通过 [`weixin-acp`](https://www.npmjs.com/package/weixin-acp) 接入微信，无需编写任何代码。
-
 
 ### Claude Code
 
@@ -39,52 +87,6 @@ npx weixin-acp start -- kimi acp
 ```
 
 `--` 后面的部分就是你的 ACP agent 启动命令，`weixin-acp` 会自动以子进程方式启动它，通过 JSON-RPC over stdio 进行通信。
-
-### LinearOS / AgentOS 微信通道绑定
-
-本仓库提供一个最小脚本，用来验证和启动「指定 LinearOS bot 独立扫码绑定微信」：
-
-```bash
-# 先构建本地 CLI
-pnpm -r run build
-
-# 查看指定 bot 的微信绑定状态
-node scripts/wechat-bind-demo.mjs status hel9000
-
-# 为指定 bot 生成微信扫码登录二维码，登录态写入 ~/.linearos/agents/hel9000/channels/wechat/
-node scripts/wechat-bind-demo.mjs login hel9000
-
-# 用同一个 bot persona 启动微信 sidecar（默认 claude-agent-acp）
-node scripts/wechat-bind-demo.mjs start hel9000
-
-# 或使用其他 ACP agent
-node scripts/wechat-bind-demo.mjs start hel9000 -- codex-acp
-```
-
-脚本用于 LinearOS 飞书 `/wechat` 绑定后的 sidecar：
-
-- 每个 bot 使用独立状态目录：`~/.linearos/agents/<slug>/channels/wechat/`
-- 微信登录态不写入 `~/.openclaw`，也不写入 LinearOS shared 目录
-- 脚本会从 `~/.linearos/agents/<slug>/config.env` 和 `profile/profile.json` 读取 bot persona
-- 脚本会生成 `~/.linearos/agents/<slug>/channels/wechat/CLAUDE.md`，并通过 `--system-prompt-file` 注入 ACP 新会话
-- 微信 prompt 明确禁止输出 `::card::`、`::field::`、`[[...]]` 等飞书卡片协议；项目创建在微信侧必须走文字草稿
-- 微信侧支持 `/clear` 清理当前用户会话上下文
-
-双栈对齐清单：
-
-- 改 LinearOS 飞书侧的投资云/权限/身份/确认卡写入路径时，必须同步核对微信 sidecar 是否有同款路径。
-- 用户确认后的系统写入子进程必须使用 `process.execPath`；不要走 PATH 里的 `node`，避免被模型直写保护包装器误拦。
-
-LinearOS 微信回归门禁：
-
-- WX-2 协议 strip：`testProjectDraftConvertsOutsideAwaitingMaterial`、`testOtherCardProtocolsAreStripped`
-- 刀0 fallback draft：`testAwaitingMaterialBadDraftGetsFallbackDraft`
-- card contract vendor + drift sentinel：`assertVendorDriftClean`、`assertHappyPath`
-- 归一化和提交前校验：`assertHappyPath`、`assertBadValueBlocksBeforeSubmit`
-- QR 双 upload shape：`assertUploadShapes`
-- extraction prompt 加固：`assertExtractionPromptUsesCanonicalFieldLayout`、`testInlineMaterialStartsExtractionInsteadOfAskingAgain`
-
-统一运行：`pnpm test:linearos`。LinearOS 专属实现位于 `packages/weixin-acp/src/linearos/`；CI 同时禁止 `packages/agent-acp` 和旧入口引用回生。upstream drift workflow 只报警，不自动合并。
 
 更多 ACP 兼容 agent 请参考 [ACP agent 列表](https://agentclientprotocol.com/get-started/agents)。
 

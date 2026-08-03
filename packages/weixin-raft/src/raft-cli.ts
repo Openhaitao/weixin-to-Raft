@@ -8,6 +8,24 @@ export interface CommandResult {
   stderr: string;
 }
 
+/**
+ * Parse `raft server info --agents` output. Lines look like
+ * `@Name (active; <status>) — <description>`; the status is free prose that
+ * may itself contain parentheses or dashes, so anchor on the `@Name (active;`
+ * prefix only and take the description after the last `) — `.
+ */
+export function parseServerAgents(output: string): RaftAgentOption[] {
+  const agents: RaftAgentOption[] = [];
+  for (const line of output.split(/\r?\n/)) {
+    const match = line.match(/^@([A-Za-z0-9_-]+) \(active;/);
+    if (!match) continue;
+    const separator = line.lastIndexOf(") — ");
+    const description = separator === -1 ? "" : line.slice(separator + 4).trim();
+    agents.push({ name: match[1]!, ...(description ? { description } : {}) });
+  }
+  return agents;
+}
+
 export interface RaftTransport {
   sendToAgent(agent: string, text: string): Promise<{ messageId: string }>;
   checkInbox(): Promise<string>;
@@ -19,6 +37,9 @@ export interface RaftCliOptions {
   bin: string;
   profile?: string;
   pollIntervalMs: number;
+  /** Kill a hung raft CLI call after this long — a stuck child process must
+   * not freeze a chat turn or the reply pump forever. */
+  commandTimeoutMs?: number;
   drainBeforeRetry?: () => Promise<void>;
 }
 
@@ -42,14 +63,24 @@ export class RaftCliTransport implements RaftTransport {
         env: this.env(),
         stdio: ["pipe", "pipe", "pipe"],
       });
+      const timeout = setTimeout(() => {
+        child.kill("SIGKILL");
+        reject(new Error(`raft ${args[0]} ${args[1] ?? ""} timed out`));
+      }, this.options.commandTimeoutMs ?? 60_000);
       let stdout = "";
       let stderr = "";
       child.stdout.setEncoding("utf-8");
       child.stderr.setEncoding("utf-8");
       child.stdout.on("data", (chunk) => { stdout += chunk; });
       child.stderr.on("data", (chunk) => { stderr += chunk; });
-      child.on("error", reject);
-      child.on("close", (code) => resolve({ code: code ?? 1, stdout, stderr }));
+      child.on("error", (error) => {
+        clearTimeout(timeout);
+        reject(error);
+      });
+      child.on("close", (code) => {
+        clearTimeout(timeout);
+        resolve({ code: code ?? 1, stdout, stderr });
+      });
       if (input !== undefined) child.stdin.end(input);
       else child.stdin.end();
     });
@@ -59,8 +90,12 @@ export class RaftCliTransport implements RaftTransport {
     const target = `dm:@${agent}`;
     let result = await this.run(["message", "send", "--target", target], `${text}\n`);
     const combined = `${result.stdout}\n${result.stderr}`;
+    // Queue acceptance is the only send proof; partial mention failures exit
+    // nonzero while the message itself IS queued, so never key off exit code.
     const accepted = /Message (?:sent|queued).*Message ID:/s.test(combined);
-    const draft = /saved as a draft|Draft saved/i.test(combined);
+    // "Draft saved: no" appears in unrelated failures — only an affirmative
+    // draft notice may trigger the drain-and-resend path.
+    const draft = /Draft saved: yes|saved as a draft/i.test(combined);
     if (!accepted && draft && this.options.drainBeforeRetry) {
       await this.options.drainBeforeRetry();
       result = await this.run(["message", "send", "--send-draft", "--target", target]);
@@ -86,12 +121,7 @@ export class RaftCliTransport implements RaftTransport {
     if (result.code !== 0) {
       throw new Error(`raft server info failed: ${result.stderr.trim().slice(0, 500)}`);
     }
-    return [...result.stdout.matchAll(/^@([A-Za-z0-9_-]+) \(active;[^)]*\)(?: — (.+))?$/gm)].map(
-      (match) => ({
-        name: match[1]!,
-        ...(match[2]?.trim() ? { description: match[2].trim() } : {}),
-      }),
-    );
+    return parseServerAgents(result.stdout);
   }
 
   startWakeLoop(onWake: () => void): () => void {
@@ -121,7 +151,9 @@ export class RaftCliTransport implements RaftTransport {
           if (line) onWake();
         }
       });
-      child.on("error", () => {});
+      child.on("error", (error) => {
+        console.error(`[weixin-raft] wake bridge spawn failed: ${String(error)}`);
+      });
       child.on("close", () => {
         child = undefined;
         if (!stopped) restartTimer = setTimeout(launch, 5_000);

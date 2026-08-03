@@ -80,6 +80,7 @@ async function run(): Promise<void> {
   WEIXIN_RAFT_DEFAULT_AGENT          默认 Agent（默认 code）
   WEIXIN_RAFT_AGENTS                 可选静态白名单；不设置则 /agent 实时列出全部在线 agent
   WEIXIN_RAFT_EXCLUDE                动态模式下要隐藏的 agent，逗号分隔
+  WEIXIN_RAFT_SYNC_WAIT_MS           同步等待回答时长，默认 90000
 `);
     return;
   }

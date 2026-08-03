@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 
+import { parseServerAgents } from "./raft-cli.js";
 import { isAllowedAgentReply, parseRaftMessages } from "./raft-message.js";
 
 // Shaped like real `raft message check` output observed on 2026-08-03:
@@ -91,5 +92,25 @@ assert.ok(
     { target: "DM:@pm", messageId: "x", time: "t", type: "agent", sender: "pm", text: "hi" },
   ),
 );
+
+// --- Server roster parsing (shaped like real `raft server info --agents`) ---
+const roster = parseServerAgents(
+  [
+    "## Server Agents",
+    "",
+    "Role labels show server-level owner/admin authority; no role label means ordinary member.",
+    "@Momo (active; online)",
+    "@code (active; working: Listing server…)",
+    // Status prose may contain parentheses and dashes — must not hide the agent.
+    "@LT (active; working: Sending a message (retry #2) — step 3)",
+    "@Buffett (active; online) — 投资研究 Agent。做公司基本面分析、估值。",
+    "@Server (active; error: Failed to authenticate: OAuth session expired)",
+    "@Gone (inactive; offline)",
+    "Showing 1-7 of 7.",
+  ].join("\n"),
+);
+assert.deepEqual(roster.map((agent) => agent.name), ["Momo", "code", "LT", "Buffett", "Server"]);
+assert.equal(roster.find((agent) => agent.name === "Buffett")?.description, "投资研究 Agent。做公司基本面分析、估值。");
+assert.equal(roster.find((agent) => agent.name === "Momo")?.description, undefined);
 
 console.log("weixin-raft message parsing tests passed");
