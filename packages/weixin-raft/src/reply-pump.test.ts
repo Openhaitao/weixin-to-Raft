@@ -1,0 +1,103 @@
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+import type { ChatResponse } from "weixin-agent-sdk";
+
+import { ReplyPump } from "./reply-pump.js";
+import { BridgeStateStore } from "./state.js";
+
+const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "weixin-raft-pump-"));
+const store = new BridgeStateStore(stateDir, () => 1);
+
+let inbox = "No new messages.\n";
+const delivered: string[] = [];
+let failNextSend = false;
+
+const pump = new ReplyPump({
+  agents: ["code", "PM"],
+  pollIntervalMs: 60_000,
+  store,
+  transport: {
+    async checkInbox() {
+      const current = inbox;
+      // Like the real CLI, a check consumes the unread window.
+      inbox = "No new messages.\n";
+      return current;
+    },
+    startWakeLoop() {
+      return () => {};
+    },
+  },
+  sendWeixin: async (response: ChatResponse) => {
+    if (failNextSend) {
+      failNextSend = false;
+      throw new Error("weixin send failed");
+    }
+    delivered.push(response.text ?? "");
+  },
+  onError: () => {},
+});
+
+// An allowlisted agent's DM reply is relayed to WeChat, labeled by sender so
+// switching agents never leaves an unattributed answer.
+inbox = [
+  "[target=dm:@PM msg=aaaa0001 time=2026-08-03 18:30:00 type=agent] @PM: 分析结果",
+  "第二行",
+  "[target=#Tech msg=aaaa0002 time=2026-08-03 18:30:10 type=human] @Haitao_Hu: 频道闲聊",
+  "[target=dm:@Sys msg=aaaa0003 time=2026-08-03 18:30:20 type=agent] @Sys: 系统通知",
+  "No more new messages.",
+].join("\n");
+await pump.drainNow();
+assert.deepEqual(delivered, ["来自 @PM：\n\n分析结果\n第二行"]);
+
+// Draining again with an empty inbox re-sends nothing.
+await pump.drainNow();
+assert.equal(delivered.length, 1);
+
+// A WeChat send failure keeps the reply pending: it survives on disk and is
+// retried on the next drain instead of being lost.
+inbox = "[target=dm:@code msg=aaaa0004 time=2026-08-03 18:31:00 type=agent] @code: 稍后要重发的回复\nNo more new messages.";
+failNextSend = true;
+await pump.drainNow();
+assert.equal(delivered.length, 1);
+assert.equal(store.pendingOutbound().length, 1);
+
+await pump.drainNow();
+assert.deepEqual(delivered.at(-1), "来自 @code：\n\n稍后要重发的回复");
+assert.equal(store.pendingOutbound().length, 0);
+
+// The same Raft message id seen twice (e.g. wake + poll racing a slow check)
+// is delivered exactly once, and stays delivered across a bridge restart.
+inbox = "[target=dm:@PM msg=aaaa0005 time=2026-08-03 18:32:00 type=agent] @PM: 只发一次\nNo more new messages.";
+await pump.drainNow();
+inbox = "[target=dm:@PM msg=aaaa0005 time=2026-08-03 18:32:00 type=agent] @PM: 只发一次\nNo more new messages.";
+await pump.drainNow();
+assert.equal(delivered.filter((text) => text.includes("只发一次")).length, 1);
+
+const restarted = new BridgeStateStore(stateDir, () => 1);
+assert.equal(restarted.hasRaftMessage("aaaa0005"), true);
+assert.equal(restarted.pendingOutbound().length, 0);
+
+// A checkInbox failure is reported, not fatal, and does not corrupt state.
+const errors: unknown[] = [];
+const failingPump = new ReplyPump({
+  agents: ["code"],
+  pollIntervalMs: 60_000,
+  store: restarted,
+  transport: {
+    async checkInbox(): Promise<string> {
+      throw new Error("raft unreachable");
+    },
+    startWakeLoop() {
+      return () => {};
+    },
+  },
+  sendWeixin: async () => {},
+  onError: (error) => errors.push(error),
+});
+await failingPump.drainNow();
+assert.equal(errors.length, 1);
+
+console.log("weixin-raft reply pump tests passed");
