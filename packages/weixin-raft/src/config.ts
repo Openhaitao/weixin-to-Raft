@@ -20,6 +20,9 @@ export interface WeixinRaftConfig {
   raftBin: string;
   stateDir: string;
   pollIntervalMs: number;
+  /** How long a forwarded message waits for the agent's reply before the
+   * turn goes silent and the reply is delivered asynchronously. */
+  syncWaitMs: number;
   allowAmbientAuth: boolean;
 }
 
@@ -99,6 +102,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): WeixinRaftConf
     raftBin: env.RAFT_BIN?.trim() || "raft",
     stateDir: env.WEIXIN_RAFT_STATE_DIR?.trim() || path.join(openclawDir, "weixin-raft"),
     pollIntervalMs: positiveInteger(env.WEIXIN_RAFT_POLL_INTERVAL_MS, 30_000),
+    syncWaitMs: positiveInteger(env.WEIXIN_RAFT_SYNC_WAIT_MS, 90_000),
     allowAmbientAuth: env.WEIXIN_RAFT_ALLOW_AMBIENT === "1",
   };
 }

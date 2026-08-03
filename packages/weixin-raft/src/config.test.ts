@@ -69,6 +69,13 @@ assert.throws(
   /positive integer/,
 );
 
+// Sync wait: default 90s, overridable.
+assert.equal(loadConfig({} as NodeJS.ProcessEnv).syncWaitMs, 90_000);
+assert.equal(
+  loadConfig({ WEIXIN_RAFT_SYNC_WAIT_MS: "45000" } as NodeJS.ProcessEnv).syncWaitMs,
+  45_000,
+);
+
 // The bridge must run as a dedicated Raft External Agent. Falling back to
 // whatever ambient identity happens to be configured would let WeChat speak
 // as that identity; require an explicit opt-in for local testing only.

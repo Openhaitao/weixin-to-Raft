@@ -81,6 +81,34 @@ const restarted = new BridgeStateStore(stateDir, () => 1);
 assert.equal(restarted.hasRaftMessage("aaaa0005"), true);
 assert.equal(restarted.pendingOutbound().length, 0);
 
+// --- Claims: a waiting chat() takes the reply as its direct answer ---
+
+// A claim opened before the reply arrives receives the item; the pump must
+// NOT also send it to WeChat as a labeled message.
+const sentBeforeClaim = delivered.length;
+const claimPromise = pump.claimNextReply("PM", 5_000);
+inbox = "[target=dm:@PM msg=aaaa0006 time=2026-08-03 18:33:00 type=agent] @PM: 直接回答内容\nNo more new messages.";
+await pump.drainNow();
+const claimed = await claimPromise;
+assert.equal(claimed?.text, "直接回答内容");
+assert.equal(delivered.length, sentBeforeClaim);
+assert.equal(store.pendingOutbound().length, 0);
+assert.equal(store.hasRaftMessage("aaaa0006"), true);
+
+// A reply already sitting in the durable queue satisfies a new claim
+// immediately (it arrived between forward and claim).
+inbox = "[target=dm:@code msg=aaaa0007 time=2026-08-03 18:34:00 type=agent] @code: 早到的回答\nNo more new messages.";
+failNextSend = true; // keep it queued instead of flushed
+await pump.drainNow();
+assert.equal(store.pendingOutbound().length, 1);
+const early = await pump.claimNextReply("code", 5_000);
+assert.equal(early?.text, "早到的回答");
+assert.equal(store.pendingOutbound().length, 0);
+
+// A claim that nothing answers resolves null after its timeout.
+const timedOut = await pump.claimNextReply("PM", 50);
+assert.equal(timedOut, null);
+
 // A checkInbox failure is reported, not fatal, and does not corrupt state.
 const errors: unknown[] = [];
 const failingPump = new ReplyPump({

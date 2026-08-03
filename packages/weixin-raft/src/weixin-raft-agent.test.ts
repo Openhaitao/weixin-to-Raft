@@ -140,6 +140,48 @@ response = await chat("   ");
 assert.match(response.text!, /文字|\/agent/);
 assert.equal(sent.length, before);
 
+// --- Direct-conversation mode (awaitReply wired) ---
+
+// An in-time reply is returned as the direct answer: no acknowledgment text,
+// no sender label — the exchange reads like talking to the agent itself.
+let nextReply: { text: string } | null = { text: "这是直接回答" };
+const directAgent = new WeixinRaftAgent({
+  listAgents: async () => roster,
+  defaultAgent: "code",
+  store,
+  transport: {
+    async sendToAgent(target, text) {
+      sent.push({ agent: target, text });
+      return { messageId: `m${sent.length}` };
+    },
+  },
+  awaitReply: async () =>
+    nextReply
+      ? { messageId: "r1", sender: "Buffett", text: nextReply.text, receivedAt: "t" }
+      : null,
+  syncWaitMs: 1_000,
+});
+response = await directAgent.chat({ conversationId: "wx-haitao", text: "第一个问题" });
+assert.equal(response.text, "这是直接回答");
+assert.equal(response.silent, undefined);
+
+// On timeout the turn ends silently; the pump delivers the late reply with a
+// label instead.
+nextReply = null;
+response = await directAgent.chat({ conversationId: "wx-haitao", text: "慢问题" });
+assert.equal(response.silent, true);
+assert.equal(response.text, undefined);
+
+// Silent turns are not persisted by the SDK ledger, so a restart can
+// redeliver the same WeChat message. The forwarded-delivery record answers
+// the redelivery silently instead of forwarding twice.
+const forwardedBefore = sent.length;
+response = await directAgent.chat({ conversationId: "wx-haitao", text: "去重测试", deliveryId: "d1" });
+assert.equal(sent.length, forwardedBefore + 1);
+response = await directAgent.chat({ conversationId: "wx-haitao", text: "去重测试", deliveryId: "d1" });
+assert.equal(response.silent, true);
+assert.equal(sent.length, forwardedBefore + 1);
+
 // Selection survives a bridge restart (state is on disk, keyed by conversation).
 const reloaded = new BridgeStateStore(stateDir, () => clock);
 assert.equal(reloaded.selectedAgent("wx-haitao", "code"), "Buffett");

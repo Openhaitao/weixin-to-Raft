@@ -21,6 +21,11 @@ interface StoredState {
   pendingMenuByConversation: Record<string, PendingMenu>;
   deliveredRaftMessageIds: string[];
   pendingOutbound: PendingOutbound[];
+  /** WeChat delivery ids already forwarded into Raft. Forwards answer with a
+   * silent response, which the SDK deliberately does not persist in its own
+   * ledger — so after a bridge restart the same WeChat message can be
+   * redelivered, and without this record it would be forwarded twice. */
+  forwardedDeliveryIds: string[];
 }
 
 const EMPTY_STATE: StoredState = {
@@ -29,6 +34,7 @@ const EMPTY_STATE: StoredState = {
   pendingMenuByConversation: {},
   deliveredRaftMessageIds: [],
   pendingOutbound: [],
+  forwardedDeliveryIds: [],
 };
 
 export class BridgeStateStore {
@@ -52,6 +58,7 @@ export class BridgeStateStore {
         pendingMenuByConversation: parsed.pendingMenuByConversation ?? {},
         deliveredRaftMessageIds: parsed.deliveredRaftMessageIds ?? [],
         pendingOutbound: parsed.pendingOutbound ?? [],
+        forwardedDeliveryIds: parsed.forwardedDeliveryIds ?? [],
       };
     } catch {
       return structuredClone(EMPTY_STATE);
@@ -126,6 +133,23 @@ export class BridgeStateStore {
 
   pendingOutbound(): PendingOutbound[] {
     return this.state.pendingOutbound.map((item) => ({ ...item }));
+  }
+
+  hasPendingOutbound(messageId: string): boolean {
+    return this.state.pendingOutbound.some((item) => item.messageId === messageId);
+  }
+
+  hasForwardedDelivery(deliveryId: string): boolean {
+    return this.state.forwardedDeliveryIds.includes(deliveryId);
+  }
+
+  recordForwardedDelivery(deliveryId: string): void {
+    if (this.hasForwardedDelivery(deliveryId)) return;
+    this.state.forwardedDeliveryIds.push(deliveryId);
+    if (this.state.forwardedDeliveryIds.length > 500) {
+      this.state.forwardedDeliveryIds = this.state.forwardedDeliveryIds.slice(-500);
+    }
+    this.save();
   }
 
   markOutboundDelivered(messageId: string): void {

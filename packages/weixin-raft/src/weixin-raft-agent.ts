@@ -4,7 +4,7 @@ import type { Agent, ChatRequest, ChatResponse } from "weixin-agent-sdk";
 
 import type { RaftAgentOption } from "./config.js";
 import type { RaftTransport } from "./raft-cli.js";
-import { BridgeStateStore } from "./state.js";
+import { BridgeStateStore, type PendingOutbound } from "./state.js";
 
 export interface WeixinRaftAgentOptions {
   /** Called on every /agent request, so the menu always reflects the live
@@ -13,6 +13,15 @@ export interface WeixinRaftAgentOptions {
   defaultAgent: string;
   store: BridgeStateStore;
   transport: Pick<RaftTransport, "sendToAgent">;
+  /**
+   * Wait for the target agent's reply so it can be returned as the direct
+   * answer to this message — no acknowledgment, no sender label, WeChat's
+   * typing indicator covers the wait. On timeout the chat turn ends silently
+   * and the pump later delivers the reply labeled `来自 @xxx`. When absent
+   * (e.g. tests), forwards fall back to an explicit acknowledgment text.
+   */
+  awaitReply?: (agent: string, timeoutMs: number) => Promise<PendingOutbound | null>;
+  syncWaitMs?: number;
 }
 
 const MENU_DESCRIPTION_MAX = 24;
@@ -98,6 +107,13 @@ export class WeixinRaftAgent implements Agent {
     }
     if (!text) return { text: "请发送文字，或发送 /agent 选择 Raft Agent。" };
 
+    // The SDK does not persist silent turns in its delivery ledger, so a
+    // restart can redeliver an already-forwarded WeChat message. Answer the
+    // redelivery silently instead of forwarding twice.
+    if (request.deliveryId && this.options.store.hasForwardedDelivery(request.deliveryId)) {
+      return { silent: true };
+    }
+
     const selected = this.options.store.selectedAgent(request.conversationId, this.options.defaultAgent);
     const requestId = randomUUID().slice(0, 8);
     const body = [
@@ -114,7 +130,17 @@ export class WeixinRaftAgent implements Agent {
         text: `发送给 ${selected} 失败，它可能已下线或改名。发送 /agent 重新选择，或稍后再试。`,
       };
     }
-    return { text: `已发送给 ${selected}，它的回复会自动回到这里。` };
+    if (request.deliveryId) this.options.store.recordForwardedDelivery(request.deliveryId);
+
+    if (!this.options.awaitReply) {
+      return { text: `已发送给 ${selected}，它的回复会自动回到这里。` };
+    }
+    const reply = await this.options.awaitReply(selected, this.options.syncWaitMs ?? 90_000);
+    // In-time answer becomes the direct reply — the conversation reads as
+    // talking to the agent itself. A slow answer arrives later via the pump,
+    // labeled, and this turn ends without a message.
+    if (reply) return { text: reply.text };
+    return { silent: true };
   }
 
   clearSession(conversationId: string): void {

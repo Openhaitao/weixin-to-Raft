@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { isLoggedIn, login, logout, start } from "weixin-agent-sdk";
+import { isLoggedIn, login, logout, start, type ChatResponse } from "weixin-agent-sdk";
 
 import { loadConfig, requireBridgeCredential, type RaftAgentOption, type WeixinRaftConfig } from "./src/config.js";
 import { RaftCliTransport } from "./src/raft-cli.js";
@@ -98,22 +98,26 @@ async function run(): Promise<void> {
     profile: config.raftProfile,
     pollIntervalMs: config.pollIntervalMs,
   });
-  const agent = new WeixinRaftAgent({
-    listAgents: makeAgentProvider(config, transport),
-    defaultAgent: config.defaultAgent,
-    store,
-    transport,
-  });
-  const abort = new AbortController();
-  const bot = start(agent, { abortSignal: abort.signal });
+  let sendWeixin: (response: ChatResponse) => Promise<void>;
   const pump = new ReplyPump({
     excludeAgents: config.excludeAgents,
     pollIntervalMs: config.pollIntervalMs,
     store,
     transport,
-    sendWeixin: (response) => bot.sendMessage(response),
+    sendWeixin: (response) => sendWeixin(response),
     onError: (error) => console.error(`[weixin-raft] ${String(error)}`),
   });
+  const agent = new WeixinRaftAgent({
+    listAgents: makeAgentProvider(config, transport),
+    defaultAgent: config.defaultAgent,
+    store,
+    transport,
+    awaitReply: (target, timeoutMs) => pump.claimNextReply(target, timeoutMs),
+    syncWaitMs: config.syncWaitMs,
+  });
+  const abort = new AbortController();
+  const bot = start(agent, { abortSignal: abort.signal });
+  sendWeixin = (response) => bot.sendMessage(response);
   transport.setDrainBeforeRetry(() => pump.drainNow());
   await pump.start();
 

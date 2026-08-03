@@ -26,7 +26,10 @@ weixin-raft logout    # 清除微信绑定
 
 微信里的交互：
 
-- 直接发文字 → 转给当前选中的 agent，回复自动带 `来自 @xxx：` 标注回到微信。
+- 直接发文字 → 转给当前选中的 agent。等待期间显示「正在输入…」，约 90 秒内
+  的回答直接作为回复出现，不带任何前缀——读起来就是在和该 agent 本人对话。
+- 慢任务超时后本轮静默结束，回答稍后送达并标注 `来自 @xxx：`（迟到的回答需要
+  署名，否则切换过 agent 后无法分辨是谁在说话）。
 - `/agent` → 实时列出全部在线 agent 的数字菜单，回复编号切换（5 分钟内有效；
   编号以你看到的那份菜单为准，中途上线的新 agent 不会顶掉你的选择）。
 - `/agent PM` → 直接切换，`@` 前缀和大小写都可以。
@@ -41,6 +44,7 @@ weixin-raft logout    # 清除微信绑定
 | `WEIXIN_RAFT_EXCLUDE` | 否 | 动态模式下从菜单隐藏、且回复不出境的 agent |
 | `WEIXIN_RAFT_STATE_DIR` | 否 | 状态目录，默认 `~/.openclaw/weixin-raft` |
 | `WEIXIN_RAFT_POLL_INTERVAL_MS` | 否 | Raft 收件箱兜底轮询间隔，默认 30000 |
+| `WEIXIN_RAFT_SYNC_WAIT_MS` | 否 | 同步等待回答的时长，超时转异步送达，默认 90000 |
 | `WEIXIN_RAFT_ALLOW_AMBIENT` | 否 | `1` 时允许无 profile 用环境身份，仅限本机联调 |
 
 ## 设计边界
