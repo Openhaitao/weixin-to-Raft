@@ -137,10 +137,15 @@ export class WeixinRaftAgent implements Agent {
     }
     const reply = await this.options.awaitReply(selected, this.options.syncWaitMs ?? 90_000);
     // In-time answer becomes the direct reply — the conversation reads as
-    // talking to the agent itself. A slow answer arrives later via the pump,
-    // labeled, and this turn ends without a message.
+    // talking to the agent itself.
     if (reply) return { text: reply.text };
-    return { silent: true };
+    // On timeout, total silence would be indistinguishable from a lost
+    // message (seen live: a message forwarded to an agent whose computer was
+    // asleep produced no response at all). Say so once; if the answer does
+    // come later the pump delivers it labeled.
+    return {
+      text: `${selected} 暂时没有回应，可能正忙或它所在的电脑不在线。它的回答完成后会自动出现；急的话可以发 /agent 换一只。`,
+    };
   }
 
   clearSession(conversationId: string): void {

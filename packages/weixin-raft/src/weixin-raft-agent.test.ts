@@ -165,12 +165,12 @@ response = await directAgent.chat({ conversationId: "wx-haitao", text: "第一�
 assert.equal(response.text, "这是直接回答");
 assert.equal(response.silent, undefined);
 
-// On timeout the turn ends silently; the pump delivers the late reply with a
-// label instead.
+// On timeout the user gets one honest notice — silence would read as a lost
+// message. The late reply still arrives via the pump, labeled.
 nextReply = null;
 response = await directAgent.chat({ conversationId: "wx-haitao", text: "慢问题" });
-assert.equal(response.silent, true);
-assert.equal(response.text, undefined);
+assert.match(response.text!, /暂时没有回应/);
+assert.match(response.text!, /\/agent/);
 
 // Silent turns are not persisted by the SDK ledger, so a restart can
 // redeliver the same WeChat message. The forwarded-delivery record answers
