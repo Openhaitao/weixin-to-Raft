@@ -109,6 +109,44 @@ assert.equal(store.pendingOutbound().length, 0);
 const timedOut = await pump.claimNextReply("PM", 50);
 assert.equal(timedOut, null);
 
+// --- Attachments: Raft replies with files become real WeChat media ---
+
+const mediaStore = new BridgeStateStore(
+  fs.mkdtempSync(path.join(os.tmpdir(), "weixin-raft-pump-media-")),
+  () => 1,
+);
+let mediaInbox = [
+  "[target=dm:@PM msg=bbbb0001 time=2026-08-04 00:30:00 type=agent] @PM: 图表在这 [1 attachment: chart.png (id:aaaabbbb-cccc-dddd-eeee-ffff00001111) — use raft attachment view to download]",
+  "No more new messages.",
+].join("\n");
+const mediaDelivered: ChatResponse[] = [];
+const mediaPump = new ReplyPump({
+  pollIntervalMs: 60_000,
+  store: mediaStore,
+  transport: {
+    async checkInbox() {
+      const current = mediaInbox;
+      mediaInbox = "No new messages.\n";
+      return current;
+    },
+    startWakeLoop() {
+      return () => {};
+    },
+  },
+  sendWeixin: async (response) => {
+    mediaDelivered.push(response);
+  },
+  fetchAttachment: async (ref) => `/tmp/dl/${ref.name}`,
+  onError: () => {},
+});
+await mediaPump.drainNow();
+assert.equal(mediaDelivered.length, 1);
+// Label kept, CLI marker stripped, first attachment as media.
+assert.match(mediaDelivered[0]!.text ?? "", /来自 @PM：/);
+assert.ok(!(mediaDelivered[0]!.text ?? "").includes("attachment view"));
+assert.equal(mediaDelivered[0]!.media?.type, "image");
+assert.equal(mediaDelivered[0]!.media?.fileName, "chart.png");
+
 // A checkInbox failure is reported, not fatal, and does not corrupt state.
 const errors: unknown[] = [];
 const failingPump = new ReplyPump({

@@ -6,6 +6,7 @@ export interface PendingOutbound {
   sender: string;
   text: string;
   receivedAt: string;
+  attachments?: Array<{ id: string; name: string }>;
 }
 
 interface PendingMenu {

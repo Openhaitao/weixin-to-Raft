@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 
 import { parseServerAgents } from "./raft-cli.js";
-import { isAllowedAgentReply, parseRaftMessages } from "./raft-message.js";
+import { extractAttachments, isAllowedAgentReply, parseRaftMessages } from "./raft-message.js";
+import { mediaTypeForFile } from "./weixin-response.js";
 
 // Shaped like real `raft message check` output observed on 2026-08-03:
 // one header line per message, multi-line bodies continue without a header,
@@ -112,5 +113,34 @@ const roster = parseServerAgents(
 assert.deepEqual(roster.map((agent) => agent.name), ["Momo", "code", "LT", "Buffett", "Server"]);
 assert.equal(roster.find((agent) => agent.name === "Buffett")?.description, "投资研究 Agent。做公司基本面分析、估值。");
 assert.equal(roster.find((agent) => agent.name === "Momo")?.description, undefined);
+
+// --- Attachment markers (shaped like real check/read output) ---
+
+// The CLI-facing marker is split into ids for forwarding; the prose keeps
+// none of the CLI instructions.
+const single = extractAttachments(
+  "我发给你了 [1 attachment: image.png (id:bd525ce0-74d0-48d9-8e7f-c73c82509601) — use raft attachment view to download]",
+);
+assert.equal(single.text, "我发给你了");
+assert.deepEqual(single.attachments, [
+  { name: "image.png", id: "bd525ce0-74d0-48d9-8e7f-c73c82509601" },
+]);
+
+const multi = extractAttachments(
+  "两个文件 [2 attachments: 报告 v2.pdf (id:11111111-2222-3333-4444-555555555555), demo.mp4 (id:66666666-7777-8888-9999-aaaaaaaaaaaa) — use raft attachment view to download]",
+);
+assert.equal(multi.text, "两个文件");
+assert.deepEqual(multi.attachments.map((ref) => ref.name), ["报告 v2.pdf", "demo.mp4"]);
+
+// No marker → text untouched, no attachments. Bracketed prose survives.
+const none = extractAttachments("正文里 [不是附件标记] 保持原样");
+assert.equal(none.text, "正文里 [不是附件标记] 保持原样");
+assert.deepEqual(none.attachments, []);
+
+// Media type inference for the WeChat side.
+assert.equal(mediaTypeForFile("photo.JPG"), "image");
+assert.equal(mediaTypeForFile("clip.mp4"), "video");
+assert.equal(mediaTypeForFile("报告 v2.pdf"), "file");
+assert.equal(mediaTypeForFile("noext"), "file");
 
 console.log("weixin-raft message parsing tests passed");

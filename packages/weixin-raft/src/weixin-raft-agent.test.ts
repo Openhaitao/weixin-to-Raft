@@ -20,7 +20,22 @@ let roster: RaftAgentOption[] = [
 let listFailures = 0;
 let sendFailures = 0;
 
-const sent: Array<{ agent: string; text: string }> = [];
+const sent: Array<{ agent: string; text: string; attachmentIds: string[] }> = [];
+const uploads: Array<{ filePath: string; target: string }> = [];
+const testTransport = {
+  async sendToAgent(target: string, text: string, attachmentIds: string[] = []) {
+    if (sendFailures > 0) {
+      sendFailures -= 1;
+      throw new Error("send failed");
+    }
+    sent.push({ agent: target, text, attachmentIds });
+    return { messageId: `m${sent.length}` };
+  },
+  async uploadAttachment(filePath: string, target: string) {
+    uploads.push({ filePath, target });
+    return { attachmentId: `att-${uploads.length}` };
+  },
+};
 const agent = new WeixinRaftAgent({
   listAgents: async () => {
     if (listFailures > 0) {
@@ -31,16 +46,7 @@ const agent = new WeixinRaftAgent({
   },
   defaultAgent: "code",
   store,
-  transport: {
-    async sendToAgent(target, text) {
-      if (sendFailures > 0) {
-        sendFailures -= 1;
-        throw new Error("send failed");
-      }
-      sent.push({ agent: target, text });
-      return { messageId: `m${sent.length}` };
-    },
-  },
+  transport: testTransport,
 });
 
 const chat = (text: string, extra: Record<string, unknown> = {}) =>
@@ -127,12 +133,36 @@ sendFailures = 1;
 response = await chat("这条会失败");
 assert.match(response.text!, /失败/);
 
-// Media is out of MVP scope: explain instead of silently dropping.
-const before = sent.length;
+// /help lists the available commands.
+response = await chat("/help");
+assert.match(response.text!, /\/agent/);
+assert.match(response.text!, /\/help/);
+
+// A WeChat attachment is uploaded to the selected agent's DM and linked on
+// the forwarded message; the caption travels as the text.
+const mediaFile = path.join(stateDir, "photo.jpg");
+fs.writeFileSync(mediaFile, "fake-image-bytes");
 response = await chat("看看这个", {
-  media: { type: "image", filePath: "/tmp/x.jpg", mimeType: "image/jpeg" },
+  media: { type: "image", filePath: mediaFile, mimeType: "image/jpeg", fileName: "photo.jpg" },
 });
-assert.match(response.text!, /文字/);
+assert.equal(uploads.length, 1);
+assert.equal(uploads[0]!.target, "dm:@Buffett");
+assert.deepEqual(sent.at(-1)!.attachmentIds, ["att-1"]);
+assert.ok(sent.at(-1)!.text.includes("看看这个"));
+
+// Attachment with no caption still forwards, with a stand-in note.
+response = await chat("", {
+  mediaItems: [{ type: "file", filePath: mediaFile, mimeType: "application/pdf", fileName: "报告.pdf" }],
+});
+assert.equal(uploads.length, 2);
+assert.match(sent.at(-1)!.text, /附件/);
+
+// A missing local file degrades to an explanation instead of a broken send.
+const before = sent.length;
+response = await chat("这个文件坏了", {
+  media: { type: "file", filePath: path.join(stateDir, "missing.bin"), mimeType: "application/octet-stream" },
+});
+assert.match(response.text!, /失败/);
 assert.equal(sent.length, before);
 
 // Empty text prompts for input instead of forwarding an empty request.
@@ -144,26 +174,41 @@ assert.equal(sent.length, before);
 
 // An in-time reply is returned as the direct answer: no acknowledgment text,
 // no sender label — the exchange reads like talking to the agent itself.
-let nextReply: { text: string } | null = { text: "这是直接回答" };
+let nextReply:
+  | { text: string; attachments?: Array<{ id: string; name: string }> }
+  | null = { text: "这是直接回答" };
 const directAgent = new WeixinRaftAgent({
   listAgents: async () => roster,
   defaultAgent: "code",
   store,
-  transport: {
-    async sendToAgent(target, text) {
-      sent.push({ agent: target, text });
-      return { messageId: `m${sent.length}` };
-    },
-  },
+  transport: testTransport,
   awaitReply: async () =>
     nextReply
-      ? { messageId: "r1", sender: "Buffett", text: nextReply.text, receivedAt: "t" }
+      ? {
+          messageId: "r1",
+          sender: "Buffett",
+          text: nextReply.text,
+          receivedAt: "t",
+          ...(nextReply.attachments ? { attachments: nextReply.attachments } : {}),
+        }
       : null,
   syncWaitMs: 1_000,
+  fetchAttachment: async (ref) => `/tmp/media/${ref.id}-${ref.name}`,
 });
 response = await directAgent.chat({ conversationId: "wx-haitao", text: "第一个问题" });
 assert.equal(response.text, "这是直接回答");
 assert.equal(response.silent, undefined);
+
+// A direct reply carrying an attachment comes back as real WeChat media,
+// still without any label.
+nextReply = {
+  text: "图表在这",
+  attachments: [{ id: "aaaabbbb-cccc-dddd-eeee-ffff00001111", name: "chart.png" }],
+};
+response = await directAgent.chat({ conversationId: "wx-haitao", text: "要图" });
+assert.equal(response.text, "图表在这");
+assert.equal(response.media?.type, "image");
+assert.match(response.media?.url ?? "", /chart\.png$/);
 
 // On timeout the user gets one honest notice — silence would read as a lost
 // message. The late reply still arrives via the pump, labeled.

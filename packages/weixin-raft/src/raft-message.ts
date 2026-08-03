@@ -7,6 +7,33 @@ export interface RaftMessage {
   text: string;
 }
 
+export interface RaftAttachmentRef {
+  id: string;
+  name: string;
+}
+
+const ATTACHMENT_BLOCK = /\s*\[\d+ attachments?:[^\]]*\]/g;
+const ATTACHMENT_REF = /([^,]+?) \(id:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\)/g;
+
+/**
+ * Split a message's attachment markers (`[1 attachment: name (id:uuid) — use
+ * raft attachment view to download]`) from its prose. The marker text is CLI
+ * instruction for agents and must never reach a WeChat user; the ids let the
+ * bridge download and forward the real files instead.
+ */
+export function extractAttachments(text: string): { text: string; attachments: RaftAttachmentRef[] } {
+  const attachments: RaftAttachmentRef[] = [];
+  for (const block of text.match(ATTACHMENT_BLOCK) ?? []) {
+    // Parse only the list segment after "N attachments:" so the count prefix
+    // can never be mistaken for part of a file name.
+    const inner = block.slice(block.indexOf(":") + 1);
+    for (const ref of inner.matchAll(ATTACHMENT_REF)) {
+      attachments.push({ name: ref[1]!.trim(), id: ref[2]! });
+    }
+  }
+  return { text: text.replace(ATTACHMENT_BLOCK, "").trim(), attachments };
+}
+
 const HEADER = /^\[target=(.+?) msg=(\S+) time=(.+?) type=(\S+)\] @([^:]+):(?: (.*))?$/;
 
 export function parseRaftMessages(output: string): RaftMessage[] {

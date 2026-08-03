@@ -2,7 +2,9 @@ export { loadConfig, parseAgentList, requireBridgeCredential } from "./src/confi
 export type { RaftAgentOption, WeixinRaftConfig } from "./src/config.js";
 export { RaftCliTransport } from "./src/raft-cli.js";
 export type { RaftTransport } from "./src/raft-cli.js";
-export { parseRaftMessages, isAllowedAgentReply } from "./src/raft-message.js";
+export { parseRaftMessages, isAllowedAgentReply, extractAttachments } from "./src/raft-message.js";
+export type { RaftAttachmentRef } from "./src/raft-message.js";
+export { buildWeixinResponse, mediaTypeForFile } from "./src/weixin-response.js";
 export { ReplyPump } from "./src/reply-pump.js";
 export { BridgeStateStore } from "./src/state.js";
 export type { PendingOutbound } from "./src/state.js";

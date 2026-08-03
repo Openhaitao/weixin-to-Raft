@@ -1,10 +1,33 @@
 import { randomUUID } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 
-import type { Agent, ChatRequest, ChatResponse } from "weixin-agent-sdk";
+import {
+  normalizeChatMedia,
+  type Agent,
+  type ChatRequest,
+  type ChatResponse,
+  type MediaAttachment,
+} from "weixin-agent-sdk";
 
 import type { RaftAgentOption } from "./config.js";
 import type { RaftTransport } from "./raft-cli.js";
 import { BridgeStateStore, type PendingOutbound } from "./state.js";
+import { buildWeixinResponse, type AttachmentFetcher } from "./weixin-response.js";
+
+const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
+
+function attachmentName(item: MediaAttachment): string {
+  return item.fileName?.trim() || path.basename(item.filePath);
+}
+
+const HELP_TEXT = [
+  "直接发文字或附件（图片/文件/视频）→ 交给当前选中的 agent，回答会直接出现在这里。",
+  "",
+  "/agent — 列出全部在线 agent，回复编号切换",
+  "/agent 名字 — 直接切换，如 /agent PM",
+  "/help — 显示本说明",
+].join("\n");
 
 export interface WeixinRaftAgentOptions {
   /** Called on every /agent request, so the menu always reflects the live
@@ -12,7 +35,10 @@ export interface WeixinRaftAgentOptions {
   listAgents: () => Promise<RaftAgentOption[]>;
   defaultAgent: string;
   store: BridgeStateStore;
-  transport: Pick<RaftTransport, "sendToAgent">;
+  transport: Pick<RaftTransport, "sendToAgent" | "uploadAttachment">;
+  /** Downloads a Raft attachment to a local file so it can be sent to WeChat
+   * as real media. When absent, replies degrade to prose with the file named. */
+  fetchAttachment?: AttachmentFetcher;
   /**
    * Wait for the target agent's reply so it can be returned as the direct
    * answer to this message — no acknowledgment, no sender label, WeChat's
@@ -93,6 +119,8 @@ export class WeixinRaftAgent implements Agent {
       return this.select(request.conversationId, name);
     }
 
+    if (/^\/help$/i.test(text)) return { text: HELP_TEXT };
+
     const command = text.match(/^\/agent(?:\s+(.+))?$/i);
     if (command) {
       return command[1]
@@ -100,12 +128,10 @@ export class WeixinRaftAgent implements Agent {
         : this.menu(request.conversationId);
     }
 
-    if (request.media || request.mediaItems?.length) {
-      return {
-        text: "当前 MVP 先支持文字消息，附件还没有转入 Raft。请先把问题用文字发给我。",
-      };
+    const media = normalizeChatMedia(request);
+    if (!text && media.length === 0) {
+      return { text: "请发送文字或附件，/agent 选择 Raft Agent，/help 查看用法。" };
     }
-    if (!text) return { text: "请发送文字，或发送 /agent 选择 Raft Agent。" };
 
     // The SDK does not persist silent turns in its delivery ledger, so a
     // restart can redeliver an already-forwarded WeChat message. Answer the
@@ -115,16 +141,38 @@ export class WeixinRaftAgent implements Agent {
     }
 
     const selected = this.options.store.selectedAgent(request.conversationId, this.options.defaultAgent);
+
+    const attachmentIds: string[] = [];
+    const attachmentNotes: string[] = [];
+    for (const item of media) {
+      const name = attachmentName(item);
+      try {
+        if (fs.statSync(item.filePath).size > MAX_UPLOAD_BYTES) {
+          attachmentNotes.push(`（附件 ${name} 超过 50MB，未转发）`);
+          continue;
+        }
+        const upload = await this.options.transport.uploadAttachment(item.filePath, `dm:@${selected}`);
+        attachmentIds.push(upload.attachmentId);
+      } catch {
+        attachmentNotes.push(`（附件 ${name} 上传失败，未转发）`);
+      }
+    }
+    if (media.length > 0 && attachmentIds.length === 0) {
+      return { text: `附件转发失败：${attachmentNotes.join("") || "上传出错"}。请稍后重试。` };
+    }
+
     const requestId = randomUUID().slice(0, 8);
     const body = [
       `【微信桥接请求 ${requestId}】`,
       "来源：海涛绑定的微信；发送身份是微信桥接 Agent，不是 Raft 人类账号。",
       "请直接回复此 DM；你的回复会由桥接程序转回微信。",
+      ...(attachmentIds.length ? ["随本消息附上用户发来的附件。"] : []),
       "",
-      text,
+      text || "（用户发来附件，未附文字说明。）",
+      ...attachmentNotes,
     ].join("\n");
     try {
-      await this.options.transport.sendToAgent(selected, body);
+      await this.options.transport.sendToAgent(selected, body, attachmentIds);
     } catch {
       return {
         text: `发送给 ${selected} 失败，它可能已下线或改名。发送 /agent 重新选择，或稍后再试。`,
@@ -137,8 +185,10 @@ export class WeixinRaftAgent implements Agent {
     }
     const reply = await this.options.awaitReply(selected, this.options.syncWaitMs ?? 90_000);
     // In-time answer becomes the direct reply — the conversation reads as
-    // talking to the agent itself.
-    if (reply) return { text: reply.text };
+    // talking to the agent itself, attachments included.
+    if (reply) {
+      return buildWeixinResponse(reply, { label: false, fetchAttachment: this.options.fetchAttachment });
+    }
     // On timeout, total silence would be indistinguishable from a lost
     // message (seen live: a message forwarded to an agent whose computer was
     // asleep produced no response at all). Say so once; if the answer does

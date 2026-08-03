@@ -27,7 +27,9 @@ export function parseServerAgents(output: string): RaftAgentOption[] {
 }
 
 export interface RaftTransport {
-  sendToAgent(agent: string, text: string): Promise<{ messageId: string }>;
+  sendToAgent(agent: string, text: string, attachmentIds?: string[]): Promise<{ messageId: string }>;
+  uploadAttachment(filePath: string, target: string): Promise<{ attachmentId: string }>;
+  downloadAttachment(attachmentId: string, outputPath: string): Promise<string>;
   checkInbox(): Promise<string>;
   listAgents(): Promise<RaftAgentOption[]>;
   startWakeLoop(onWake: () => void): () => void;
@@ -86,9 +88,13 @@ export class RaftCliTransport implements RaftTransport {
     });
   }
 
-  async sendToAgent(agent: string, text: string): Promise<{ messageId: string }> {
+  async sendToAgent(agent: string, text: string, attachmentIds: string[] = []): Promise<{ messageId: string }> {
     const target = `dm:@${agent}`;
-    let result = await this.run(["message", "send", "--target", target], `${text}\n`);
+    const attachmentArgs = attachmentIds.flatMap((id) => ["--attachment-id", id]);
+    let result = await this.run(
+      ["message", "send", "--target", target, ...attachmentArgs],
+      `${text}\n`,
+    );
     const combined = `${result.stdout}\n${result.stderr}`;
     // Queue acceptance is the only send proof; partial mention failures exit
     // nonzero while the message itself IS queued, so never key off exit code.
@@ -106,6 +112,23 @@ export class RaftCliTransport implements RaftTransport {
       throw new Error(`Raft message send failed: ${finalOutput.trim().slice(0, 500)}`);
     }
     return { messageId: id };
+  }
+
+  async uploadAttachment(filePath: string, target: string): Promise<{ attachmentId: string }> {
+    const result = await this.run(["attachment", "upload", "--path", filePath, "--target", target]);
+    const id = `${result.stdout}\n${result.stderr}`.match(/Attachment ID:\s*([0-9a-f-]+)/i)?.[1];
+    if (!id) {
+      throw new Error(`raft attachment upload failed: ${result.stderr.trim().slice(0, 500)}`);
+    }
+    return { attachmentId: id };
+  }
+
+  async downloadAttachment(attachmentId: string, outputPath: string): Promise<string> {
+    const result = await this.run(["attachment", "view", attachmentId, "--output", outputPath]);
+    if (result.code !== 0) {
+      throw new Error(`raft attachment view failed: ${result.stderr.trim().slice(0, 500)}`);
+    }
+    return outputPath;
   }
 
   async checkInbox(): Promise<string> {

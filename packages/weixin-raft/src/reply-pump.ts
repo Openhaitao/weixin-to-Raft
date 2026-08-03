@@ -1,8 +1,9 @@
 import type { ChatResponse } from "weixin-agent-sdk";
 
 import type { RaftTransport } from "./raft-cli.js";
-import { isAllowedAgentReply, parseRaftMessages } from "./raft-message.js";
+import { extractAttachments, isAllowedAgentReply, parseRaftMessages } from "./raft-message.js";
 import { BridgeStateStore, type PendingOutbound } from "./state.js";
+import { buildWeixinResponse, type AttachmentFetcher } from "./weixin-response.js";
 
 export interface ReplyPumpOptions {
   excludeAgents?: string[];
@@ -10,6 +11,7 @@ export interface ReplyPumpOptions {
   store: BridgeStateStore;
   transport: Pick<RaftTransport, "checkInbox" | "startWakeLoop">;
   sendWeixin: (response: ChatResponse) => Promise<void>;
+  fetchAttachment?: AttachmentFetcher;
   onError?: (error: unknown) => void;
 }
 
@@ -96,11 +98,13 @@ export class ReplyPump {
       for (const message of parseRaftMessages(output)) {
         if (!isAllowedAgentReply(message, this.options.excludeAgents ?? [])) continue;
         if (this.options.store.hasRaftMessage(message.messageId)) continue;
+        const { text, attachments } = extractAttachments(message.text);
         const item: PendingOutbound = {
           messageId: message.messageId,
           sender: message.sender,
-          text: message.text,
+          text,
           receivedAt: message.time,
+          ...(attachments.length ? { attachments } : {}),
         };
         this.options.store.enqueueOutbound(item);
         this.settleClaims(item);
@@ -126,9 +130,12 @@ export class ReplyPump {
         continue;
       }
       try {
-        await this.options.sendWeixin({
-          text: [`来自 @${item.sender}：`, "", item.text].join("\n"),
-        });
+        await this.options.sendWeixin(
+          await buildWeixinResponse(item, {
+            label: true,
+            fetchAttachment: this.options.fetchAttachment,
+          }),
+        );
         this.options.store.markOutboundDelivered(item.messageId);
       } catch (error) {
         this.options.onError?.(error);

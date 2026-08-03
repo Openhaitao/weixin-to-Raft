@@ -1,5 +1,8 @@
 #!/usr/bin/env node
 
+import fs from "node:fs";
+import path from "node:path";
+
 import { isLoggedIn, login, logout, start, type ChatResponse } from "weixin-agent-sdk";
 
 import { loadConfig, requireBridgeCredential, type RaftAgentOption, type WeixinRaftConfig } from "./src/config.js";
@@ -99,6 +102,14 @@ async function run(): Promise<void> {
     profile: config.raftProfile,
     pollIntervalMs: config.pollIntervalMs,
   });
+  const mediaDir = path.join(config.stateDir, "media");
+  fs.mkdirSync(mediaDir, { recursive: true, mode: 0o700 });
+  const fetchAttachment = (ref: { id: string; name: string }) =>
+    transport.downloadAttachment(
+      ref.id,
+      path.join(mediaDir, `${ref.id.slice(0, 8)}-${ref.name.replace(/[/\\]/g, "_")}`),
+    );
+
   let sendWeixin: (response: ChatResponse) => Promise<void>;
   const pump = new ReplyPump({
     excludeAgents: config.excludeAgents,
@@ -106,6 +117,7 @@ async function run(): Promise<void> {
     store,
     transport,
     sendWeixin: (response) => sendWeixin(response),
+    fetchAttachment,
     onError: (error) => console.error(`[weixin-raft] ${String(error)}`),
   });
   const agent = new WeixinRaftAgent({
@@ -115,6 +127,7 @@ async function run(): Promise<void> {
     transport,
     awaitReply: (target, timeoutMs) => pump.claimNextReply(target, timeoutMs),
     syncWaitMs: config.syncWaitMs,
+    fetchAttachment,
   });
   const abort = new AbortController();
   const bot = start(agent, { abortSignal: abort.signal });
