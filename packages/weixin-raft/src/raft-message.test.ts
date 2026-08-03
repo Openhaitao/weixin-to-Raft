@@ -44,39 +44,35 @@ const tricky = parseRaftMessages(
 assert.equal(tricky.length, 1);
 assert.equal(tricky[0]!.text, "代码示例\n[not a header] 仍是正文");
 
-const allowlist = ["code", "PM", "Buffett"];
-
-// Only agent replies arriving in that agent's own DM go back to WeChat.
-assert.ok(isAllowedAgentReply(messages[0]!, allowlist));
-assert.ok(isAllowedAgentReply(messages[2]!, allowlist));
+// Any agent's own top-level DM reply goes back to WeChat (dynamic mode).
+assert.ok(isAllowedAgentReply(messages[0]!));
+assert.ok(isAllowedAgentReply(messages[2]!));
 
 // Humans never echo back to WeChat, even in a DM-shaped target.
 assert.equal(
   isAllowedAgentReply(
     { target: "dm:@PM", messageId: "x", time: "t", type: "human", sender: "PM", text: "hi" },
-    allowlist,
   ),
   false,
 );
 
-// Channel traffic from an allowlisted agent stays in Raft.
+// Channel traffic stays in Raft.
 assert.equal(
   isAllowedAgentReply(
     { target: "#Tech", messageId: "x", time: "t", type: "agent", sender: "PM", text: "hi" },
-    allowlist,
   ),
   false,
 );
 
 // Thread replies are deliberately excluded from the MVP pump: the bridge
 // only speaks in top-level DM messages, so only those are relayed back.
-assert.equal(isAllowedAgentReply(messages[3]!, allowlist), false);
+assert.equal(isAllowedAgentReply(messages[3]!), false);
 
-// A non-allowlisted agent DM (e.g. @Sys) must not leak to WeChat.
+// An excluded agent's DM must not leak to WeChat, case-insensitively.
 assert.equal(
   isAllowedAgentReply(
     { target: "dm:@Sys", messageId: "x", time: "t", type: "agent", sender: "Sys", text: "hi" },
-    allowlist,
+    ["sys"],
   ),
   false,
 );
@@ -85,7 +81,6 @@ assert.equal(
 assert.equal(
   isAllowedAgentReply(
     { target: "dm:@PM", messageId: "x", time: "t", type: "agent", sender: "Buffett", text: "hi" },
-    allowlist,
   ),
   false,
 );
@@ -94,7 +89,6 @@ assert.equal(
 assert.ok(
   isAllowedAgentReply(
     { target: "DM:@pm", messageId: "x", time: "t", type: "agent", sender: "pm", text: "hi" },
-    allowlist,
   ),
 );
 

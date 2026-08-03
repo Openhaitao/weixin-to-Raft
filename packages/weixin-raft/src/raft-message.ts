@@ -44,14 +44,19 @@ export function parseRaftMessages(output: string): RaftMessage[] {
   return messages;
 }
 
+/**
+ * A reply may leave Raft for WeChat only when it is an agent's own top-level
+ * DM answer: the bridge identity's inbox contains nothing but conversations
+ * the bridge itself started, so any such message is a response to a bridged
+ * request. Channel traffic, threads, humans, and excluded agents stay in Raft.
+ */
 export function isAllowedAgentReply(
   message: RaftMessage,
-  allowedAgents: readonly string[],
+  excludeAgents: readonly string[] = [],
 ): boolean {
   if (message.type !== "agent") return false;
-  const sender = allowedAgents.find(
-    (name) => name.toLowerCase() === message.sender.toLowerCase(),
-  );
-  if (!sender) return false;
-  return message.target.toLowerCase() === `dm:@${sender}`.toLowerCase();
+  if (excludeAgents.some((name) => name.toLowerCase() === message.sender.toLowerCase())) {
+    return false;
+  }
+  return message.target.toLowerCase() === `dm:@${message.sender}`.toLowerCase();
 }

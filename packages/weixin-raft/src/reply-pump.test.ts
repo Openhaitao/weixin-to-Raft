@@ -16,7 +16,7 @@ const delivered: string[] = [];
 let failNextSend = false;
 
 const pump = new ReplyPump({
-  agents: ["code", "PM"],
+  excludeAgents: ["Sys"],
   pollIntervalMs: 60_000,
   store,
   transport: {
@@ -40,8 +40,9 @@ const pump = new ReplyPump({
   onError: () => {},
 });
 
-// An allowlisted agent's DM reply is relayed to WeChat, labeled by sender so
-// switching agents never leaves an unattributed answer.
+// Any agent's own DM reply is relayed to WeChat, labeled by sender so
+// switching agents never leaves an unattributed answer. Channel traffic and
+// explicitly excluded agents (here @Sys) stay in Raft.
 inbox = [
   "[target=dm:@PM msg=aaaa0001 time=2026-08-03 18:30:00 type=agent] @PM: 分析结果",
   "第二行",
@@ -83,7 +84,6 @@ assert.equal(restarted.pendingOutbound().length, 0);
 // A checkInbox failure is reported, not fatal, and does not corrupt state.
 const errors: unknown[] = [];
 const failingPump = new ReplyPump({
-  agents: ["code"],
   pollIntervalMs: 60_000,
   store: restarted,
   transport: {

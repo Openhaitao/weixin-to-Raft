@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import type { RaftAgentOption } from "./config.js";
 import { BridgeStateStore } from "./state.js";
 import { WeixinRaftAgent } from "./weixin-raft-agent.js";
 
@@ -10,17 +11,32 @@ const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "weixin-raft-agent-"));
 let clock = 1_000_000;
 const store = new BridgeStateStore(stateDir, () => clock);
 
+// Live roster, mutable mid-test the way a real server roster is.
+let roster: RaftAgentOption[] = [
+  { name: "code", description: "技术开发" },
+  { name: "PM", description: "产品研究" },
+  { name: "Buffett", description: "投资研究 Agent。做公司基本面分析、估值、行业与竞争格局研究。" },
+];
+let listFailures = 0;
+let sendFailures = 0;
+
 const sent: Array<{ agent: string; text: string }> = [];
 const agent = new WeixinRaftAgent({
-  agents: [
-    { name: "code", description: "技术开发" },
-    { name: "PM", description: "产品研究" },
-    { name: "Buffett" },
-  ],
+  listAgents: async () => {
+    if (listFailures > 0) {
+      listFailures -= 1;
+      throw new Error("raft unreachable");
+    }
+    return roster;
+  },
   defaultAgent: "code",
   store,
   transport: {
     async sendToAgent(target, text) {
+      if (sendFailures > 0) {
+        sendFailures -= 1;
+        throw new Error("send failed");
+      }
       sent.push({ agent: target, text });
       return { messageId: `m${sent.length}` };
     },
@@ -42,41 +58,57 @@ assert.match(sent[0]!.text, /海涛绑定的微信/);
 assert.match(sent[0]!.text, /请直接回复此 DM/);
 assert.ok(sent[0]!.text.endsWith("帮我查一下服务器状态"));
 
-// /agent opens the numbered menu with the current selection marked.
+// /agent lists the live roster with the current selection marked and long
+// descriptions truncated for a phone screen.
 response = await chat("/agent");
 assert.match(response.text!, /当前 Agent：code/);
 assert.match(response.text!, /1\. code ✓ — 技术开发/);
 assert.match(response.text!, /2\. PM — 产品研究/);
-assert.match(response.text!, /3\. Buffett/);
+assert.match(response.text!, /3\. Buffett — .+…/);
+assert.ok(!response.text!.includes("竞争格局"));
 
 // A bare number right after the menu is a selection, not a message.
 response = await chat("2");
 assert.match(response.text!, /已切换到 PM/);
 assert.equal(sent.length, 1);
 
-response = await chat("PM 你好");
+await chat("PM 你好");
 assert.equal(sent[1]!.agent, "PM");
 
 // The number is consumed: a second "2" is now an ordinary message.
-response = await chat("2");
+await chat("2");
 assert.equal(sent[2]!.agent, "PM");
 assert.ok(sent[2]!.text.endsWith("2"));
 
 // Out-of-range number after a fresh menu → clear error, nothing forwarded.
 await chat("/agent");
 response = await chat("9");
-assert.match(response.text!, /没有找到/);
+assert.match(response.text!, /没有编号 9/);
 assert.equal(sent.length, 3);
+
+// Numeric selection binds to the menu snapshot the user saw, even if the
+// roster changed between showing the menu and the reply.
+await chat("/agent");
+roster = [{ name: "Newcomer" }, ...roster];
+response = await chat("3");
+assert.match(response.text!, /已切换到 Buffett/);
+
+// A fresh menu reflects the new roster immediately — no config change needed.
+response = await chat("/agent");
+assert.match(response.text!, /1\. Newcomer/);
+assert.match(response.text!, /4\. Buffett ✓/);
+await chat("1");
+assert.match((await chat("你是谁")).text!, /已发送给 Newcomer/);
 
 // Direct switching without the menu: /agent <name>, @ prefix and case tolerated.
 response = await chat("/agent @buffett");
 assert.match(response.text!, /已切换到 Buffett/);
-assert.match((await chat("估值问题")).text!, /已发送给 Buffett/);
 
 // Unknown name → error, selection unchanged.
-response = await chat("/agent Sys");
+response = await chat("/agent Nobody");
 assert.match(response.text!, /没有找到/);
-assert.equal((await chat("再问一个")) && sent.at(-1)!.agent, "Buffett");
+await chat("再问一个");
+assert.equal(sent.at(-1)!.agent, "Buffett");
 
 // The menu expires after 5 minutes; a late number is treated as text.
 await chat("/agent");
@@ -84,6 +116,16 @@ clock += 5 * 60_000 + 1;
 await chat("1");
 assert.equal(sent.at(-1)!.agent, "Buffett");
 assert.ok(sent.at(-1)!.text.endsWith("1"));
+
+// Raft being unreachable degrades to an explanation, not a crash.
+listFailures = 1;
+response = await chat("/agent");
+assert.match(response.text!, /拿不到 agent 列表/);
+
+// A failed forward tells the user instead of losing the message silently.
+sendFailures = 1;
+response = await chat("这条会失败");
+assert.match(response.text!, /失败/);
 
 // Media is out of MVP scope: explain instead of silently dropping.
 const before = sent.length;

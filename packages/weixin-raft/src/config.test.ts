@@ -23,7 +23,28 @@ assert.throws(() => parseAgentList("@=x"), /Invalid Raft agent name/);
 // case-insensitive duplicates because Raft names resolve case-insensitively.
 assert.throws(() => parseAgentList("code,CODE"), /Duplicate/);
 
-// loadConfig: default agent must be a member of the allowlist.
+// No WEIXIN_RAFT_AGENTS (or "all"/"*") means dynamic mode: the menu is built
+// live from the server, and the default agent falls back to code.
+const dynamic = loadConfig({} as NodeJS.ProcessEnv);
+assert.equal(dynamic.agents, undefined);
+assert.equal(dynamic.defaultAgent, "code");
+assert.deepEqual(dynamic.excludeAgents, []);
+
+// In dynamic mode the default agent is not membership-checked at load time
+// (the roster is only known live); doctor validates it against the server.
+const dynamicDefault = loadConfig({
+  WEIXIN_RAFT_AGENTS: "*",
+  WEIXIN_RAFT_DEFAULT_AGENT: "@PM",
+} as NodeJS.ProcessEnv);
+assert.equal(dynamicDefault.agents, undefined);
+assert.equal(dynamicDefault.defaultAgent, "PM");
+
+assert.deepEqual(
+  loadConfig({ WEIXIN_RAFT_EXCLUDE: "@Sys, Server ," } as NodeJS.ProcessEnv).excludeAgents,
+  ["Sys", "Server"],
+);
+
+// loadConfig: with a static allowlist, the default agent must be a member.
 const config = loadConfig({
   WEIXIN_RAFT_AGENTS: "code=技术,PM=产品",
   WEIXIN_RAFT_DEFAULT_AGENT: "@pm",

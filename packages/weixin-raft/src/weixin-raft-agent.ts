@@ -7,61 +7,88 @@ import type { RaftTransport } from "./raft-cli.js";
 import { BridgeStateStore } from "./state.js";
 
 export interface WeixinRaftAgentOptions {
-  agents: RaftAgentOption[];
+  /** Called on every /agent request, so the menu always reflects the live
+   * server roster (static configurations wrap a constant list here). */
+  listAgents: () => Promise<RaftAgentOption[]>;
   defaultAgent: string;
   store: BridgeStateStore;
   transport: Pick<RaftTransport, "sendToAgent">;
 }
 
+const MENU_DESCRIPTION_MAX = 24;
+
+function menuLine(agent: RaftAgentOption, index: number, current: string): string {
+  const selected = agent.name.toLowerCase() === current.toLowerCase();
+  let description = agent.description ?? "";
+  if (description.length > MENU_DESCRIPTION_MAX) {
+    description = `${description.slice(0, MENU_DESCRIPTION_MAX)}…`;
+  }
+  return `${index + 1}. ${agent.name}${selected ? " ✓" : ""}${description ? ` — ${description}` : ""}`;
+}
+
 export class WeixinRaftAgent implements Agent {
   constructor(private readonly options: WeixinRaftAgentOptions) {}
 
-  private resolveAgent(input: string): RaftAgentOption | undefined {
-    const trimmed = input.trim().replace(/^@/, "");
-    if (/^\d+$/.test(trimmed)) return this.options.agents[Number(trimmed) - 1];
-    return this.options.agents.find(
-      (agent) => agent.name.toLowerCase() === trimmed.toLowerCase(),
-    );
-  }
-
-  private menu(conversationId: string): ChatResponse {
+  private async menu(conversationId: string): Promise<ChatResponse> {
     const current = this.options.store.selectedAgent(conversationId, this.options.defaultAgent);
-    this.options.store.openAgentMenu(conversationId);
-    const choices = this.options.agents.map((agent, index) => {
-      const selected = agent.name.toLowerCase() === current.toLowerCase();
-      return `${index + 1}. ${agent.name}${selected ? " ✓" : ""}`
-        + `${agent.description ? ` — ${agent.description}` : ""}`;
-    });
+    let agents: RaftAgentOption[];
+    try {
+      agents = await this.options.listAgents();
+    } catch {
+      return { text: "暂时拿不到 agent 列表（Raft 连接失败），稍后再试 /agent。" };
+    }
+    if (agents.length === 0) {
+      return { text: "服务器上没有可选的 agent。" };
+    }
+    this.options.store.openAgentMenu(conversationId, agents.map((agent) => agent.name));
     return {
       text: [
         `当前 Agent：${current}`,
         "",
-        ...choices,
+        ...agents.map((agent, index) => menuLine(agent, index, current)),
         "",
         "回复编号，或发送 /agent 名称；选择在 5 分钟内有效。",
       ].join("\n"),
     };
   }
 
-  private select(conversationId: string, input: string): ChatResponse {
-    const agent = this.resolveAgent(input);
-    if (!agent) {
-      return {
-        text: `没有找到「${input.trim()}」。请重新发送 /agent 查看可选列表。`,
-      };
+  private select(conversationId: string, name: string): ChatResponse {
+    this.options.store.selectAgent(conversationId, name);
+    return { text: `已切换到 ${name}。下一条消息会交给它。` };
+  }
+
+  private async selectByName(conversationId: string, input: string): Promise<ChatResponse> {
+    const requested = input.trim().replace(/^@/, "");
+    let agents: RaftAgentOption[];
+    try {
+      agents = await this.options.listAgents();
+    } catch {
+      return { text: "暂时拿不到 agent 列表（Raft 连接失败），稍后再试 /agent。" };
     }
-    this.options.store.selectAgent(conversationId, agent.name);
-    return { text: `已切换到 ${agent.name}。下一条消息会交给它。` };
+    const match = agents.find((agent) => agent.name.toLowerCase() === requested.toLowerCase());
+    if (!match) {
+      return { text: `没有找到「${input.trim()}」。请发送 /agent 查看可选列表。` };
+    }
+    return this.select(conversationId, match.name);
   }
 
   async chat(request: ChatRequest): Promise<ChatResponse> {
     const text = request.text.trim();
-    const pendingNumber = this.options.store.consumeAgentMenuNumber(request.conversationId, text);
-    if (pendingNumber !== undefined) return this.select(request.conversationId, String(pendingNumber));
+
+    const choice = this.options.store.consumeAgentMenuChoice(request.conversationId, text);
+    if (choice) {
+      const name = choice.options[choice.index - 1];
+      if (!name) {
+        return { text: `没有编号 ${choice.index}。请重新发送 /agent 查看列表。` };
+      }
+      return this.select(request.conversationId, name);
+    }
 
     const command = text.match(/^\/agent(?:\s+(.+))?$/i);
     if (command) {
-      return command[1] ? this.select(request.conversationId, command[1]) : this.menu(request.conversationId);
+      return command[1]
+        ? this.selectByName(request.conversationId, command[1])
+        : this.menu(request.conversationId);
     }
 
     if (request.media || request.mediaItems?.length) {
@@ -80,7 +107,13 @@ export class WeixinRaftAgent implements Agent {
       "",
       text,
     ].join("\n");
-    await this.options.transport.sendToAgent(selected, body);
+    try {
+      await this.options.transport.sendToAgent(selected, body);
+    } catch {
+      return {
+        text: `发送给 ${selected} 失败，它可能已下线或改名。发送 /agent 重新选择，或稍后再试。`,
+      };
+    }
     return { text: `已发送给 ${selected}，它的回复会自动回到这里。` };
   }
 

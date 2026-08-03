@@ -7,7 +7,14 @@ export interface RaftAgentOption {
 }
 
 export interface WeixinRaftConfig {
-  agents: RaftAgentOption[];
+  /**
+   * Static allowlist. Undefined means dynamic mode: the /agent menu is built
+   * live from the server's active agent list on every request, so newly
+   * added agents appear without any configuration change.
+   */
+  agents?: RaftAgentOption[];
+  /** Agents hidden from the dynamic menu and never relayed back to WeChat. */
+  excludeAgents: string[];
   defaultAgent: string;
   raftProfile?: string;
   raftBin: string;
@@ -58,19 +65,35 @@ function positiveInteger(raw: string | undefined, fallback: number): number {
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): WeixinRaftConfig {
-  const agents = parseAgentList(env.WEIXIN_RAFT_AGENTS ?? "code=技术开发,PM=产品研究,Buffett=投资研究,Music=音乐");
-  const requestedDefault = normalizeAgentName(env.WEIXIN_RAFT_DEFAULT_AGENT ?? agents[0]!.name);
-  const defaultAgent = agents.find(
-    (agent) => agent.name.toLowerCase() === requestedDefault.toLowerCase(),
-  )?.name;
-  if (!defaultAgent) {
-    throw new Error(`WEIXIN_RAFT_DEFAULT_AGENT is not in WEIXIN_RAFT_AGENTS: ${requestedDefault}`);
+  const rawAgents = env.WEIXIN_RAFT_AGENTS?.trim();
+  const dynamic = !rawAgents || rawAgents === "all" || rawAgents === "*";
+  const agents = dynamic ? undefined : parseAgentList(rawAgents);
+
+  const requestedDefault = normalizeAgentName(
+    env.WEIXIN_RAFT_DEFAULT_AGENT ?? (agents ? agents[0]!.name : "code"),
+  );
+  let defaultAgent = requestedDefault;
+  if (agents) {
+    const member = agents.find(
+      (agent) => agent.name.toLowerCase() === requestedDefault.toLowerCase(),
+    );
+    if (!member) {
+      throw new Error(`WEIXIN_RAFT_DEFAULT_AGENT is not in WEIXIN_RAFT_AGENTS: ${requestedDefault}`);
+    }
+    defaultAgent = member.name;
   }
+
+  const excludeAgents = (env.WEIXIN_RAFT_EXCLUDE ?? "")
+    .split(",")
+    .map((item) => normalizeAgentName(item))
+    .filter(Boolean);
+
   const openclawDir = env.OPENCLAW_STATE_DIR?.trim()
     || env.CLAWDBOT_STATE_DIR?.trim()
     || path.join(os.homedir(), ".openclaw");
   return {
     agents,
+    excludeAgents,
     defaultAgent,
     raftProfile: env.RAFT_PROFILE?.trim() || undefined,
     raftBin: env.RAFT_BIN?.trim() || "raft",

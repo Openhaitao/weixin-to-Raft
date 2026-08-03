@@ -43,7 +43,9 @@ transport.checkInbox = async () => {
 
 const store = new BridgeStateStore(fs.mkdtempSync(path.join(config.stateDir, "e2e-")));
 const agent = new WeixinRaftAgent({
-  agents: config.agents,
+  listAgents: config.agents
+    ? async () => config.agents!
+    : () => transport.listAgents(),
   defaultAgent: config.defaultAgent,
   store,
   transport,
@@ -54,7 +56,7 @@ let resolveDone: () => void;
 const done = new Promise<void>((resolve) => { resolveDone = resolve; });
 
 const pump = new ReplyPump({
-  agents: config.agents.map((item) => item.name),
+  excludeAgents: config.excludeAgents,
   pollIntervalMs: Math.min(config.pollIntervalMs, 10_000),
   store,
   transport,

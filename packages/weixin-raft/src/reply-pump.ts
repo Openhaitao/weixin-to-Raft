@@ -5,7 +5,7 @@ import { isAllowedAgentReply, parseRaftMessages } from "./raft-message.js";
 import { BridgeStateStore } from "./state.js";
 
 export interface ReplyPumpOptions {
-  agents: string[];
+  excludeAgents?: string[];
   pollIntervalMs: number;
   store: BridgeStateStore;
   transport: Pick<RaftTransport, "checkInbox" | "startWakeLoop">;
@@ -44,7 +44,7 @@ export class ReplyPump {
     try {
       const output = await this.options.transport.checkInbox();
       for (const message of parseRaftMessages(output)) {
-        if (!isAllowedAgentReply(message, this.options.agents)) continue;
+        if (!isAllowedAgentReply(message, this.options.excludeAgents ?? [])) continue;
         this.options.store.enqueueOutbound({
           messageId: message.messageId,
           sender: message.sender,

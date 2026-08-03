@@ -1,5 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 
+import type { RaftAgentOption } from "./config.js";
+
 export interface CommandResult {
   code: number;
   stdout: string;
@@ -9,7 +11,7 @@ export interface CommandResult {
 export interface RaftTransport {
   sendToAgent(agent: string, text: string): Promise<{ messageId: string }>;
   checkInbox(): Promise<string>;
-  listAgents(): Promise<string[]>;
+  listAgents(): Promise<RaftAgentOption[]>;
   startWakeLoop(onWake: () => void): () => void;
 }
 
@@ -79,12 +81,17 @@ export class RaftCliTransport implements RaftTransport {
     return result.stdout;
   }
 
-  async listAgents(): Promise<string[]> {
-    const result = await this.run(["server", "info", "--agents"]);
+  async listAgents(): Promise<RaftAgentOption[]> {
+    const result = await this.run(["server", "info", "--agents", "--limit", "200"]);
     if (result.code !== 0) {
       throw new Error(`raft server info failed: ${result.stderr.trim().slice(0, 500)}`);
     }
-    return [...result.stdout.matchAll(/^@([A-Za-z0-9_-]+) \(active;/gm)].map((match) => match[1]!);
+    return [...result.stdout.matchAll(/^@([A-Za-z0-9_-]+) \(active;[^)]*\)(?: — (.+))?$/gm)].map(
+      (match) => ({
+        name: match[1]!,
+        ...(match[2]?.trim() ? { description: match[2].trim() } : {}),
+      }),
+    );
   }
 
   startWakeLoop(onWake: () => void): () => void {

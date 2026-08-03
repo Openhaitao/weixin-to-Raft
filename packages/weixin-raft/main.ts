@@ -2,11 +2,26 @@
 
 import { isLoggedIn, login, logout, start } from "weixin-agent-sdk";
 
-import { loadConfig, requireBridgeCredential } from "./src/config.js";
+import { loadConfig, requireBridgeCredential, type RaftAgentOption, type WeixinRaftConfig } from "./src/config.js";
 import { RaftCliTransport } from "./src/raft-cli.js";
 import { ReplyPump } from "./src/reply-pump.js";
 import { BridgeStateStore } from "./src/state.js";
 import { WeixinRaftAgent } from "./src/weixin-raft-agent.js";
+
+function makeAgentProvider(
+  config: WeixinRaftConfig,
+  transport: RaftCliTransport,
+): () => Promise<RaftAgentOption[]> {
+  if (config.agents) {
+    const fixed = config.agents;
+    return async () => fixed;
+  }
+  const excluded = new Set(config.excludeAgents.map((name) => name.toLowerCase()));
+  return async () => {
+    const live = await transport.listAgents();
+    return live.filter((agent) => !excluded.has(agent.name.toLowerCase()));
+  };
+}
 
 async function doctor(): Promise<void> {
   const config = loadConfig();
@@ -17,13 +32,24 @@ async function doctor(): Promise<void> {
     pollIntervalMs: config.pollIntervalMs,
   });
   const available = await transport.listAgents();
-  const missing = config.agents.filter(
-    (agent) => !available.some((name) => name.toLowerCase() === agent.name.toLowerCase()),
-  );
-  if (missing.length) {
-    throw new Error(`Configured Raft agents not found or inactive: ${missing.map((item) => item.name).join(", ")}`);
+  if (config.agents) {
+    const missing = config.agents.filter(
+      (agent) => !available.some((item) => item.name.toLowerCase() === agent.name.toLowerCase()),
+    );
+    if (missing.length) {
+      throw new Error(`Configured Raft agents not found or inactive: ${missing.map((item) => item.name).join(", ")}`);
+    }
+    console.log(`Raft ready: ${config.agents.map((agent) => agent.name).join(", ")}`);
+    return;
   }
-  console.log(`Raft ready: ${config.agents.map((agent) => agent.name).join(", ")}`);
+  const visible = await makeAgentProvider(config, transport)();
+  if (!visible.some((agent) => agent.name.toLowerCase() === config.defaultAgent.toLowerCase())) {
+    throw new Error(`Default agent not found or inactive on the server: ${config.defaultAgent}`);
+  }
+  console.log(
+    `Raft ready (dynamic): ${visible.length} agents visible, default ${config.defaultAgent}`
+    + `${config.excludeAgents.length ? `, excluded: ${config.excludeAgents.join(", ")}` : ""}`,
+  );
 }
 
 async function run(): Promise<void> {
@@ -49,10 +75,11 @@ async function run(): Promise<void> {
   weixin-raft start      启动双向桥接
   weixin-raft logout     清除微信绑定
 
-必需环境变量:
-  RAFT_PROFILE                       专用 Raft External Agent profile
-  WEIXIN_RAFT_AGENTS                 逗号分隔白名单，例如 code=技术开发,PM=产品研究
-  WEIXIN_RAFT_DEFAULT_AGENT          默认 Agent（可选，默认白名单第一项）
+环境变量:
+  RAFT_PROFILE                       必填，专用 Raft External Agent profile
+  WEIXIN_RAFT_DEFAULT_AGENT          默认 Agent（默认 code）
+  WEIXIN_RAFT_AGENTS                 可选静态白名单；不设置则 /agent 实时列出全部在线 agent
+  WEIXIN_RAFT_EXCLUDE                动态模式下要隐藏的 agent，逗号分隔
 `);
     return;
   }
@@ -72,7 +99,7 @@ async function run(): Promise<void> {
     pollIntervalMs: config.pollIntervalMs,
   });
   const agent = new WeixinRaftAgent({
-    agents: config.agents,
+    listAgents: makeAgentProvider(config, transport),
     defaultAgent: config.defaultAgent,
     store,
     transport,
@@ -80,7 +107,7 @@ async function run(): Promise<void> {
   const abort = new AbortController();
   const bot = start(agent, { abortSignal: abort.signal });
   const pump = new ReplyPump({
-    agents: config.agents.map((item) => item.name),
+    excludeAgents: config.excludeAgents,
     pollIntervalMs: config.pollIntervalMs,
     store,
     transport,

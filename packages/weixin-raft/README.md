@@ -1,7 +1,8 @@
 # weixin-raft
 
-微信 ↔ Raft Agent 路由桥。把绑定的微信接到一组白名单 Raft agent 上：默认发给一只
-bot，在微信里发送 `/agent` 随时查看和切换。
+微信 ↔ Raft Agent 路由桥。把绑定的微信接到整个 Raft：默认发给一只 bot，在微信里
+发送 `/agent` 实时列出服务器上全部在线 agent 并随时切换——新加入的 agent 自动出
+现在菜单里，无需改配置。也可以用 `WEIXIN_RAFT_AGENTS` 锁定一个静态白名单。
 
 ```text
 你的微信
@@ -15,10 +16,9 @@ weixin-raft（路由、/agent 菜单、去重、重启恢复）
 
 ```bash
 export RAFT_PROFILE=wechat-bridge          # 专用 Raft External Agent 的 profile
-export WEIXIN_RAFT_AGENTS="code=技术开发,PM=产品研究,Buffett=投资研究"
-export WEIXIN_RAFT_DEFAULT_AGENT=code      # 可选，默认取白名单第一项
+export WEIXIN_RAFT_DEFAULT_AGENT=code      # 可选，默认 code
 
-weixin-raft doctor    # 校验 Raft 身份可用、白名单 agent 全部在线注册
+weixin-raft doctor    # 校验 Raft 身份可用、默认 agent 在线
 weixin-raft login     # 微信扫码绑定（首次）
 weixin-raft start     # 启动双向桥接
 weixin-raft logout    # 清除微信绑定
@@ -27,7 +27,8 @@ weixin-raft logout    # 清除微信绑定
 微信里的交互：
 
 - 直接发文字 → 转给当前选中的 agent，回复自动带 `来自 @xxx：` 标注回到微信。
-- `/agent` → 数字菜单，回复编号切换（5 分钟内有效）。
+- `/agent` → 实时列出全部在线 agent 的数字菜单，回复编号切换（5 分钟内有效；
+  编号以你看到的那份菜单为准，中途上线的新 agent 不会顶掉你的选择）。
 - `/agent PM` → 直接切换，`@` 前缀和大小写都可以。
 
 ## 环境变量
@@ -35,8 +36,9 @@ weixin-raft logout    # 清除微信绑定
 | 变量 | 必填 | 说明 |
 | --- | --- | --- |
 | `RAFT_PROFILE` | 是 | 桥接专用 Raft External Agent 的 profile slug |
-| `WEIXIN_RAFT_AGENTS` | 是 | 逗号分隔白名单，`名称=描述`，描述可省略 |
-| `WEIXIN_RAFT_DEFAULT_AGENT` | 否 | 默认 agent，必须在白名单内 |
+| `WEIXIN_RAFT_DEFAULT_AGENT` | 否 | 默认 agent，默认 `code` |
+| `WEIXIN_RAFT_AGENTS` | 否 | 静态白名单 `名称=描述,…`；不设或设 `all`/`*` 为动态模式 |
+| `WEIXIN_RAFT_EXCLUDE` | 否 | 动态模式下从菜单隐藏、且回复不出境的 agent |
 | `WEIXIN_RAFT_STATE_DIR` | 否 | 状态目录，默认 `~/.openclaw/weixin-raft` |
 | `WEIXIN_RAFT_POLL_INTERVAL_MS` | 否 | Raft 收件箱兜底轮询间隔，默认 30000 |
 | `WEIXIN_RAFT_ALLOW_AMBIENT` | 否 | `1` 时允许无 profile 用环境身份，仅限本机联调 |
@@ -45,9 +47,10 @@ weixin-raft logout    # 清除微信绑定
 
 - **身份**：微信消息进入 Raft 时，发送者是桥接 agent 自己，正文标注「来自海涛
   绑定的微信」；桥不伪装任何 Raft 人类账号。
-- **白名单**：只有 `WEIXIN_RAFT_AGENTS` 里的 agent 会出现在 `/agent` 菜单，
-  也只有它们的 **DM 顶层回复** 会被转回微信；频道消息、线程回复、人类消息、
-  白名单外 agent 一律不出境。
+- **出境规则**：只有 agent 自己 DM 里的 **顶层回复** 会被转回微信——桥身份的
+  收件箱里只会有它自己发起的对话，所以这等价于「只转桥代发请求的回音」。频道
+  消息、线程回复、人类消息、`WEIXIN_RAFT_EXCLUDE`（或静态白名单外）的 agent
+  一律不出境。
 - **凭证**：默认强制 `RAFT_PROFILE` 专用身份，缺失即拒绝启动，不回落到环境里
   恰好存在的其他身份。
 - **可靠性**：Raft → 微信方向持久化到磁盘队列，发送失败保留待发、成功才标记；

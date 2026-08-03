@@ -10,6 +10,9 @@ export interface PendingOutbound {
 
 interface PendingMenu {
   expiresAt: number;
+  /** Names in the order they were shown, so a numeric reply is resolved
+   * against the exact menu the user saw — never against a fresher list. */
+  options: string[];
 }
 
 interface StoredState {
@@ -74,12 +77,23 @@ export class BridgeStateStore {
     this.save();
   }
 
-  openAgentMenu(conversationId: string, ttlMs = 5 * 60_000): void {
-    this.state.pendingMenuByConversation[conversationId] = { expiresAt: this.now() + ttlMs };
+  openAgentMenu(conversationId: string, options: string[], ttlMs = 5 * 60_000): void {
+    this.state.pendingMenuByConversation[conversationId] = {
+      expiresAt: this.now() + ttlMs,
+      options: [...options],
+    };
     this.save();
   }
 
-  consumeAgentMenuNumber(conversationId: string, text: string): number | undefined {
+  /**
+   * When a menu is pending and the reply is a bare number, consume the menu
+   * and return the snapshot plus the 1-based index. Returns undefined when no
+   * menu applies (expired, absent, or the text is not a number).
+   */
+  consumeAgentMenuChoice(
+    conversationId: string,
+    text: string,
+  ): { options: string[]; index: number } | undefined {
     const pending = this.state.pendingMenuByConversation[conversationId];
     if (!pending) return undefined;
     if (pending.expiresAt <= this.now()) {
@@ -90,7 +104,7 @@ export class BridgeStateStore {
     if (!/^\d+$/.test(text.trim())) return undefined;
     delete this.state.pendingMenuByConversation[conversationId];
     this.save();
-    return Number(text.trim());
+    return { options: pending.options ?? [], index: Number(text.trim()) };
   }
 
   clearPendingMenu(conversationId: string): void {
