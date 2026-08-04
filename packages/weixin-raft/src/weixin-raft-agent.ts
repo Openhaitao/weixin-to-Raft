@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import fs from "node:fs";
 import path from "node:path";
 
 import {
@@ -14,8 +13,6 @@ import type { RaftAgentOption } from "./config.js";
 import type { RaftTransport } from "./raft-cli.js";
 import { BridgeStateStore, type PendingOutbound } from "./state.js";
 import { buildWeixinResponse, type AttachmentFetcher } from "./weixin-response.js";
-
-const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
 
 function attachmentName(item: MediaAttachment): string {
   return item.fileName?.trim() || path.basename(item.filePath);
@@ -142,19 +139,19 @@ export class WeixinRaftAgent implements Agent {
 
     const selected = this.options.store.selectedAgent(request.conversationId, this.options.defaultAgent);
 
+    // No bridge-side size policy: the Raft server is the only authority on
+    // upload limits, and its rejection reason is relayed to the user.
     const attachmentIds: string[] = [];
     const attachmentNotes: string[] = [];
     for (const item of media) {
       const name = attachmentName(item);
       try {
-        if (fs.statSync(item.filePath).size > MAX_UPLOAD_BYTES) {
-          attachmentNotes.push(`（附件 ${name} 超过 50MB，未转发）`);
-          continue;
-        }
         const upload = await this.options.transport.uploadAttachment(item.filePath, `dm:@${selected}`);
         attachmentIds.push(upload.attachmentId);
-      } catch {
-        attachmentNotes.push(`（附件 ${name} 上传失败，未转发）`);
+      } catch (error) {
+        const reason = (error instanceof Error ? error.message : String(error))
+          .split("\n")[0]!.slice(0, 120);
+        attachmentNotes.push(`（附件 ${name} 上传失败：${reason}）`);
       }
     }
     if (media.length > 0 && attachmentIds.length === 0) {

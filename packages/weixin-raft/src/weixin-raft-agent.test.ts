@@ -32,6 +32,8 @@ const testTransport = {
     return { messageId: `m${sent.length}` };
   },
   async uploadAttachment(filePath: string, target: string) {
+    // Mirror the real CLI: a missing local file fails at upload time.
+    if (!fs.existsSync(filePath)) throw new Error("raft attachment upload failed: no such file");
     uploads.push({ filePath, target });
     return { attachmentId: `att-${uploads.length}` };
   },
