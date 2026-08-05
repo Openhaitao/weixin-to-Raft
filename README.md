@@ -1,72 +1,66 @@
 # weixin-agent-sdk
 
-> 本项目非微信官方项目，代码由 [@tencent-weixin/openclaw-weixin](https://npmx.dev/package/@tencent-weixin/openclaw-weixin) 改造而来，仅供学习交流使用。
+> This is not an official WeChat project. The code is adapted from [@tencent-weixin/openclaw-weixin](https://npmx.dev/package/@tencent-weixin/openclaw-weixin) and is intended for learning and research purposes.
 
-用微信连接你的 AI Agent。核心场景：**把微信接入 [Raft](https://raft.build) 多 agent 协作平台** —— 在微信里直接和你 Raft 服务器上的任意 agent 对话，随时用 `/agent` 切换对象；也可以用底层 SDK 把任意 AI 后端接进微信。
+Connect your AI agents to WeChat. The flagship use case: **bridge WeChat to a [Raft](https://raft.build) multi-agent collaboration server** — chat with any agent on your Raft server directly from WeChat and switch between them with `/agent` at any time. You can also use the underlying SDK to plug any AI backend into WeChat.
 
-## 微信 ↔ Raft
+## WeChat ↔ Raft
 
 ```text
-你的微信
-  ↕ weixin-agent-sdk（扫码绑定、长轮询收发，无需公网服务器）
-weixin-raft（路由、/agent 菜单、同步等待、去重、重启恢复）
-  ↕ raft CLI（专用 External Agent 身份）
-Raft 服务器上的任意 agent
+Your WeChat
+  ↕ weixin-agent-sdk (QR binding, long polling — no public server needed)
+weixin-raft (routing, /agent menu, synchronous wait, dedupe, restart recovery)
+  ↕ raft CLI (dedicated External Agent identity)
+Any agent on your Raft server
 ```
 
-体验上就是一场普通的微信对话：
+The experience reads like a normal WeChat conversation:
 
-- 直接发文字或附件 → 交给当前选中的 agent。等待期间显示「正在输入…」，回答在
-  时限内（默认 90 秒）直接作为回复出现，没有任何转接提示和前缀。
-- `/agent` → 实时列出服务器上全部在线 agent，回复编号或 `/agent 名字` 切换；
-  新上线的 agent 自动出现在菜单里，无需改配置。
-- 附件双向转发：微信的图片/文件/视频/语音自动变成 Raft 附件交给 agent；agent
-  回复携带的附件自动作为图片/视频/文件回到微信。
-- 慢任务超时后给出一句明确说明，回答完成后自动补送并标注 `来自 @xxx`。
+- Send text or attachments → they go to the currently selected agent. A typing indicator shows while you wait, and answers arriving within the window (90s by default) appear as direct replies — no relay notices, no prefixes.
+- `/agent` → a live list of every online agent on the server; reply with a number or `/agent name` to switch. Newly added agents show up automatically with zero configuration.
+- Attachments forward in both directions: WeChat images/files/videos/voice become Raft attachments for the agent; attachments on agent replies come back to WeChat as real media.
+- If a task runs long, you get one clear notice at timeout, and the answer is delivered later labeled `来自 @xxx`.
 
-### 快速开始
+### Quick start
 
-1. **创建桥接身份**：在 Raft 侧边栏 agents 区点 **+** → **Create External Agent**
-   （不要选普通 agent——桥接进程自己就是它的运行时）。
-2. **登录**：按新 agent 的 External Setup 卡片执行
-   `raft agent login --server <url> --agent <id> --profile-slug wechat-bridge`，
-   在浏览器批准一次。
-3. **绑定微信并启动**：
+1. **Create the bridge identity**: in Raft's sidebar agents area, click **+** → **Create External Agent** (not a regular agent — the bridge process itself is its runtime).
+2. **Log in**: follow the new agent's External Setup card and run
+   `raft agent login --server <url> --agent <id> --profile-slug wechat-bridge`,
+   then approve once in the browser.
+3. **Bind WeChat and start**:
 
 ```bash
 export RAFT_PROFILE=wechat-bridge
-export WEIXIN_RAFT_DEFAULT_AGENT=code   # 默认对话的 agent
+export WEIXIN_RAFT_DEFAULT_AGENT=code   # the default agent to talk to
 
 pnpm install && pnpm -r run build
-pnpm --filter weixin-raft exec tsx main.ts doctor   # 校验身份与默认 agent
-pnpm --filter weixin-raft exec tsx main.ts login    # 微信扫码绑定
-pnpm --filter weixin-raft exec tsx main.ts start    # 启动双向桥接
+pnpm --filter weixin-raft exec tsx main.ts doctor   # verify identity + default agent
+pnpm --filter weixin-raft exec tsx main.ts login    # scan the QR code with WeChat
+pnpm --filter weixin-raft exec tsx main.ts start    # start the bidirectional bridge
 ```
 
-生产环境建议用 launchd/systemd 常驻。完整环境变量、可靠性语义（磁盘队列、
-按消息去重、重启恢复、草稿保护）和身份边界见
-[`packages/weixin-raft/README.md`](packages/weixin-raft/README.md)。
+For production, run it under launchd/systemd. Full environment variables, reliability semantics (durable disk queue, per-message dedupe, restart recovery, draft protection) and identity boundaries are documented in
+[`packages/weixin-raft/README.md`](packages/weixin-raft/README.md).
 
-### 设计边界
+### Design boundaries
 
-- 桥使用专用 Raft External Agent 身份，微信消息进入 Raft 时明确标注来源，
-  **不伪装任何人类账号**；缺少 `RAFT_PROFILE` 时拒绝启动，不回落到环境身份。
-- 只有 agent 自己 DM 里的顶层回复会转回微信；频道消息、线程、人类消息一律不出境。
-- Raft → 微信方向持久化到磁盘队列：发送失败保留重试，按消息 id 去重，重启不重发。
+- The bridge uses a dedicated Raft External Agent identity and clearly labels the origin of every message entering Raft — it **never impersonates a human account**. It refuses to start without `RAFT_PROFILE` rather than falling back to an ambient identity.
+- Only an agent's own top-level DM replies leave Raft for WeChat; channel messages, threads, and human messages never do.
+- The Raft → WeChat direction is persisted in a durable on-disk queue: failed sends are retried, deliveries are deduped by message id, and restarts never resend.
 
-## 项目结构
+## Repository layout
 
 ```
 packages/
-  sdk/                  weixin-agent-sdk —— 微信桥接 SDK
-  weixin-raft/          微信 ↔ Raft 路由桥（本仓库的核心应用）
-  weixin-acp/           ACP (Agent Client Protocol) 适配器
-  example-openai/       基于 OpenAI 的示例
+  sdk/                  weixin-agent-sdk — the WeChat bridge SDK
+  weixin-raft/          the WeChat ↔ Raft router bridge (this repo's flagship app)
+  weixin-acp/           ACP (Agent Client Protocol) adapter
+  example-openai/       an OpenAI-based example
 ```
 
-## 通过 ACP 接入 Claude Code, Codex, kimi-cli 等 Agent
+## Connect Claude Code, Codex, kimi-cli and other agents via ACP
 
-[ACP (Agent Client Protocol)](https://agentclientprotocol.com/) 是一个开放的 Agent 通信协议。如果你已有兼容 ACP 的 agent，可以直接通过 [`weixin-acp`](https://www.npmjs.com/package/weixin-acp) 接入微信，无需编写任何代码。
+[ACP (Agent Client Protocol)](https://agentclientprotocol.com/) is an open agent communication protocol. If you already have an ACP-compatible agent, [`weixin-acp`](https://www.npmjs.com/package/weixin-acp) connects it to WeChat without writing any code.
 
 ### Claude Code
 
@@ -80,27 +74,27 @@ npx weixin-acp claude-code
 npx weixin-acp codex
 ```
 
-### 其它 ACP Agent
+### Other ACP agents
 
-比如 kimi-cli：
+For example, kimi-cli:
 
 ```bash
 npx weixin-acp start -- kimi acp
 ```
 
-`--` 后面的部分就是你的 ACP agent 启动命令，`weixin-acp` 会自动以子进程方式启动它，通过 JSON-RPC over stdio 进行通信。
+Everything after `--` is your ACP agent's launch command; `weixin-acp` starts it as a child process and talks JSON-RPC over stdio.
 
-更多 ACP 兼容 agent 请参考 [ACP agent 列表](https://agentclientprotocol.com/get-started/agents)。
+See the [ACP agent list](https://agentclientprotocol.com/get-started/agents) for more compatible agents.
 
-## 自定义 Agent
+## Custom agents
 
-SDK 主要导出三样东西：
+The SDK exports three main things:
 
-- **`Agent`** 接口 —— 实现它就能接入微信
-- **`login()`** —— 扫码登录
-- **`start(agent)`** —— 启动消息循环，立即返回可主动发消息的 `Bot`
+- **`Agent`** — implement this interface to connect to WeChat
+- **`login()`** — QR-code login
+- **`start(agent)`** — starts the message loop and immediately returns a `Bot` that can send proactive messages
 
-### Agent 接口
+### The Agent interface
 
 ```typescript
 interface Agent {
@@ -108,34 +102,34 @@ interface Agent {
 }
 
 interface ChatRequest {
-  conversationId: string;         // 用户标识，可用于维护多轮对话
-  text: string;                   // 文本内容
-  media?: {                       // 附件（图片/语音/视频/文件）
+  conversationId: string;         // user identifier, for multi-turn context
+  text: string;                   // text content
+  media?: {                       // attachment (image/audio/video/file)
     type: "image" | "audio" | "video" | "file";
-    filePath: string;             // 本地文件路径（已下载解密）
+    filePath: string;             // local file path (already downloaded & decrypted)
     mimeType: string;
     fileName?: string;
   };
 }
 
 interface ChatResponse {
-  text?: string;                  // 回复文本（支持 markdown，发送前自动转纯文本）
-  media?: {                       // 回复媒体
+  text?: string;                  // reply text (markdown is converted to plain text before sending)
+  media?: {                       // reply media
     type: "image" | "video" | "file";
-    url: string;                  // 本地路径或 HTTPS URL
+    url: string;                  // local path or HTTPS URL
     fileName?: string;
   };
 }
 ```
 
-### 最简示例
+### Minimal example
 
 ```typescript
 import { login, start, type Agent } from "weixin-agent-sdk";
 
 const echo: Agent = {
   async chat(req) {
-    return { text: `你说了: ${req.text}` };
+    return { text: `You said: ${req.text}` };
   },
 };
 
@@ -144,7 +138,7 @@ const bot = start(echo);
 await bot.wait();
 ```
 
-### 完整示例（自己管理对话历史）
+### Full example (managing conversation history yourself)
 
 ```typescript
 import { login, start, type Agent } from "weixin-agent-sdk";
@@ -156,7 +150,7 @@ const myAgent: Agent = {
     const history = conversations.get(req.conversationId) ?? [];
     history.push(req.text);
 
-    // 调用你的 AI 服务...
+    // call your AI service...
     const reply = await callMyAI(history);
 
     history.push(reply);
@@ -170,9 +164,9 @@ const bot = start(myAgent);
 await bot.wait();
 ```
 
-### 主动发送消息
+### Proactive messages
 
-`start()` 会立即返回 `Bot` 实例。`Bot` 提供了 `sendMessage()`，可以在收到微信消息之外，主动给当前登录用户发送内容；如果是 CLI/脚本程序，可以用 `bot.wait()` 等待消息循环结束。
+`start()` returns a `Bot` immediately. Besides replying to incoming messages, `bot.sendMessage()` lets you push content to the logged-in user; CLI programs can use `bot.wait()` to block until the message loop stops.
 
 ```typescript
 import { login, start, type Agent } from "weixin-agent-sdk";
@@ -182,7 +176,7 @@ const agent: Agent = {
     if (req.text === "ping") {
       return { text: "pong" };
     }
-    return { text: `收到：${req.text}` };
+    return { text: `Received: ${req.text}` };
   },
 };
 
@@ -190,17 +184,17 @@ await login();
 const bot = start(agent);
 
 setInterval(() => {
-  void bot.sendMessage("定时提醒：记得查看最新状态");
+  void bot.sendMessage("Scheduled reminder: check the latest status");
 }, 60_000);
 
 await bot.wait();
 ```
 
-也可以主动发送完整的 `ChatResponse`，包括图片、视频或文件：
+You can also send a full `ChatResponse`, including images, video, or files:
 
 ```typescript
 await bot.sendMessage({
-  text: "这是最新报表",
+  text: "Here is the latest report",
   media: {
     type: "file",
     url: "./reports/daily.pdf",
@@ -209,75 +203,75 @@ await bot.sendMessage({
 });
 ```
 
-注意事项：
+Notes:
 
-- 主动发送依赖微信下发的 `context_token`
-- 需要在 `start()` 运行期间，至少先收到过当前账号的一条入站消息
-- `context_token` 有时效，可能是 24 小时；过期后需要再次收到新消息才能继续主动发送
+- Proactive sending depends on a `context_token` issued by WeChat
+- At least one inbound message must have been received for the current account while `start()` is running
+- The `context_token` expires (roughly 24 hours); after expiry, a new inbound message is needed before proactive sending works again
 
-### OpenAI 示例
+### OpenAI example
 
-`packages/example-openai/` 是一个完整的 OpenAI Agent 实现，支持多轮对话和图片输入：
+`packages/example-openai/` is a complete OpenAI agent implementation with multi-turn conversation and image input:
 
 ```bash
 pnpm install
 
-# 扫码登录微信
+# QR-code login
 pnpm run login -w packages/example-openai
 
-# 启动 bot
+# start the bot
 OPENAI_API_KEY=sk-xxx pnpm run start -w packages/example-openai
 ```
 
-支持的环境变量：
+Supported environment variables:
 
-| 变量 | 必填 | 说明 |
+| Variable | Required | Description |
 |------|------|------|
-| `OPENAI_API_KEY` | 是 | OpenAI API Key |
-| `OPENAI_BASE_URL` | 否 | 自定义 API 地址（兼容 OpenAI 接口的第三方服务） |
-| `OPENAI_MODEL` | 否 | 模型名称，默认 `gpt-5.4` |
-| `SYSTEM_PROMPT` | 否 | 系统提示词 |
+| `OPENAI_API_KEY` | Yes | OpenAI API key |
+| `OPENAI_BASE_URL` | No | Custom API endpoint (OpenAI-compatible services) |
+| `OPENAI_MODEL` | No | Model name, default `gpt-5.4` |
+| `SYSTEM_PROMPT` | No | System prompt |
 
-## 支持的消息类型
+## Supported message types
 
-### 接收（微信 → Agent）
+### Receiving (WeChat → Agent)
 
-| 类型 | `media.type` | 说明 |
+| Type | `media.type` | Notes |
 |------|-------------|------|
-| 文本 | — | `request.text` 直接拿到文字 |
-| 图片 | `image` | 自动从 CDN 下载解密，`filePath` 指向本地文件 |
-| 语音 | `audio` | SILK 格式自动转 WAV（需安装 `silk-wasm`） |
-| 视频 | `video` | 自动下载解密 |
-| 文件 | `file` | 自动下载解密，保留原始文件名 |
-| 引用消息 | — | 被引用的文本拼入 `request.text`，被引用的媒体作为 `media` 传入 |
-| 语音转文字 | — | 微信侧转写的文字直接作为 `request.text` |
+| Text | — | delivered directly as `request.text` |
+| Image | `image` | auto-downloaded from CDN and decrypted; `filePath` points to a local file |
+| Voice | `audio` | SILK auto-converted to WAV (requires `silk-wasm`) |
+| Video | `video` | auto-downloaded and decrypted |
+| File | `file` | auto-downloaded and decrypted, original filename preserved |
+| Quoted message | — | quoted text is merged into `request.text`; quoted media arrives as `media` |
+| Voice-to-text | — | WeChat's transcription arrives directly as `request.text` |
 
-### 发送（Agent → 微信）
+### Sending (Agent → WeChat)
 
-| 类型 | 用法 |
+| Type | Usage |
 |------|------|
-| 文本 | 返回 `{ text: "..." }` |
-| 图片 | 返回 `{ media: { type: "image", url: "/path/to/img.png" } }` |
-| 视频 | 返回 `{ media: { type: "video", url: "/path/to/video.mp4" } }` |
-| 文件 | 返回 `{ media: { type: "file", url: "/path/to/doc.pdf" } }` |
-| 文本 + 媒体 | `text` 和 `media` 同时返回，文本作为附带说明发送 |
-| 远程图片 | `url` 填 HTTPS 链接，SDK 自动下载后上传到微信 CDN |
-| 主动发送 | 通过 `const bot = start(agent)` 后调用 `bot.sendMessage(...)` |
+| Text | return `{ text: "..." }` |
+| Image | return `{ media: { type: "image", url: "/path/to/img.png" } }` |
+| Video | return `{ media: { type: "video", url: "/path/to/video.mp4" } }` |
+| File | return `{ media: { type: "file", url: "/path/to/doc.pdf" } }` |
+| Text + media | return both `text` and `media`; the text is sent as a caption |
+| Remote image | pass an HTTPS URL; the SDK downloads and uploads it to the WeChat CDN |
+| Proactive | call `bot.sendMessage(...)` on the `Bot` returned by `start(agent)` |
 
-## 内置斜杠命令
+## Built-in slash commands
 
-在微信中发送以下命令：
+Send these in WeChat:
 
-- `/echo <消息>` —— 直接回复（不经过 Agent），附带通道耗时统计
-- `/toggle-debug` —— 开关 debug 模式，启用后每条回复追加全链路耗时
+- `/echo <message>` — reply directly (bypassing the Agent), with channel timing stats
+- `/toggle-debug` — toggle debug mode; when on, every reply appends end-to-end timing
 
-## 技术细节
+## Technical details
 
-- 使用 **长轮询** (`getUpdates`) 接收消息，无需公网服务器
-- 媒体文件通过微信 CDN 中转，**AES-128-ECB** 加密传输
-- 单账号模式：每次 `login` 覆盖之前的账号
-- 断点续传：`get_updates_buf` 持久化到 `~/.openclaw/`，重启后从上次位置继续
-- 会话过期自动重连（errcode -14 触发 1 小时冷却后恢复）
+- Messages are received via **long polling** (`getUpdates`) — no public server needed
+- Media transits the WeChat CDN with **AES-128-ECB** encryption
+- Single-account mode: each `login` replaces the previous account
+- Resumable: `get_updates_buf` is persisted to `~/.openclaw/`, so restarts continue from the last position
+- Automatic reconnection on session expiry (errcode -14 triggers a 1-hour cooldown before recovery)
 - Node.js >= 22
 
 ## Star History
