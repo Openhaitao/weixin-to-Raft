@@ -30,12 +30,35 @@ export type WeixinApiOptions = {
 // BaseInfo — attached to every outgoing CGI request
 // ---------------------------------------------------------------------------
 
+/**
+ * The version we report to WeChat on every request.
+ *
+ * This walked up a FIXED two levels, which is correct for `src/api/api.ts` and
+ * wrong for the bundle: everything is flattened into `dist/index.mjs`, so two
+ * levels up from there is the workspace's `packages/` directory, which has no
+ * package.json. Every built consumer therefore announced itself as "unknown"
+ * while source runs announced the real version — a difference in what the
+ * server sees that nobody could observe from the outside. Walk up until the
+ * SDK's own manifest is found instead of assuming a depth.
+ */
 function readChannelVersion(): string {
   try {
-    const dir = path.dirname(fileURLToPath(import.meta.url));
-    const pkgPath = path.resolve(dir, "..", "..", "package.json");
-    const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8")) as { version?: string };
-    return pkg.version ?? "unknown";
+    let dir = path.dirname(fileURLToPath(import.meta.url));
+    for (let i = 0; i < 5; i++) {
+      const pkgPath = path.join(dir, "package.json");
+      if (fs.existsSync(pkgPath)) {
+        const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8")) as {
+          name?: string;
+          version?: string;
+        };
+        // Only ours: a consumer's package.json would report their version.
+        if (pkg.name === "weixin-agent-sdk" && pkg.version) return pkg.version;
+      }
+      const parent = path.dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
+    }
+    return "unknown";
   } catch {
     return "unknown";
   }
