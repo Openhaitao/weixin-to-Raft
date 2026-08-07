@@ -1,4 +1,4 @@
-# weixin-agent-sdk
+# weixin-to-Raft
 
 > This is not an official WeChat project. The code is adapted from [@tencent-weixin/openclaw-weixin](https://npmx.dev/package/@tencent-weixin/openclaw-weixin) and is intended for learning and research purposes.
 
