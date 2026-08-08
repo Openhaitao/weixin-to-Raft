@@ -90,6 +90,9 @@ export async function login(opts?: LoginOptions): Promise<string> {
     apiBaseUrl,
     timeoutMs: 480_000,
     botType: DEFAULT_ILINK_BOT_TYPE,
+    // Refreshed codes reach the caller the same way the first one did.
+    onQr: opts?.onQr,
+    printQr: opts?.printQr,
   });
 
   if (!waitResult.connected || !waitResult.botToken || !waitResult.accountId) {
