@@ -1,3 +1,7 @@
+import fs from "node:fs";
+import path from "node:path";
+
+import { resolveStateDir } from "../storage/state-dir.js";
 import { logger } from "../util/logger.js";
 import { generateId } from "../util/random.js";
 import type { WeixinMessage, MessageItem } from "../api/types.js";
@@ -9,9 +13,20 @@ import { MessageItemType } from "../api/types.js";
 
 /**
  * contextToken is issued per-message by the Weixin getupdates API and must
- * be echoed verbatim in every outbound send. It is not persisted: the monitor
- * loop populates this map on each inbound message, and the outbound adapter
- * reads it back when the agent sends a reply.
+ * be echoed verbatim in every outbound send. The monitor loop populates this
+ * map on each inbound message, and the outbound adapter reads it back.
+ *
+ * **It is also persisted to disk**, because without the token we cannot send
+ * at all — and a bot that only ever replies is fine, but one that has promised
+ * to remind you at 8am is not. Keeping this in memory only meant every restart
+ * silently killed every pending reminder until the user happened to speak again.
+ * Nothing reported that; the reminder just never arrived.
+ *
+ * State file: `<stateDir>/openclaw-weixin/context-tokens.json`
+ * Format:     `{ "<accountId>:<userId>": { "token": "…", "at": "<ISO>" } }`
+ *
+ * The token still expires on the Weixin side (session expiry / re-login), and
+ * a stale one simply fails the send — which is no worse than having none.
  */
 const contextTokenStore = new Map<string, string>();
 
@@ -19,15 +34,65 @@ function contextTokenKey(accountId: string, userId: string): string {
   return `${accountId}:${userId}`;
 }
 
+function resolveContextTokenPath(): string {
+  return path.join(resolveStateDir(), "openclaw-weixin", "context-tokens.json");
+}
+
+interface StoredToken {
+  token: string;
+  /** When we last saw this token, so we can reason about staleness later. */
+  at: string;
+}
+
+/** Disk is loaded once, lazily: the map is authoritative afterwards. */
+let loadedFromDisk = false;
+
+function loadTokensFromDisk(): void {
+  if (loadedFromDisk) return;
+  loadedFromDisk = true;
+  try {
+    const raw = fs.readFileSync(resolveContextTokenPath(), "utf-8");
+    const parsed = JSON.parse(raw) as Record<string, StoredToken>;
+    for (const [key, value] of Object.entries(parsed ?? {})) {
+      if (value?.token) contextTokenStore.set(key, value.token);
+    }
+    logger.debug(`loadTokensFromDisk: restored ${contextTokenStore.size} token(s)`);
+  } catch {
+    // missing or corrupt — start fresh, exactly like debug-mode does
+  }
+}
+
+function saveTokensToDisk(): void {
+  const filePath = resolveContextTokenPath();
+  try {
+    const out: Record<string, StoredToken> = {};
+    const at = new Date().toISOString();
+    for (const [key, token] of contextTokenStore) out[key] = { token, at };
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    // temp + rename so a crash mid-write cannot leave a corrupt file behind
+    const tmp = `${filePath}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(out, null, 2), { encoding: "utf-8", mode: 0o600 });
+    fs.renameSync(tmp, filePath);
+  } catch (error) {
+    // Never let persistence break message handling — but say so, because a
+    // silent failure here reintroduces exactly the bug this code exists to fix.
+    logger.debug(`saveTokensToDisk failed: ${String(error)}`);
+  }
+}
+
 /** Store a context token for a given account+user pair. */
 export function setContextToken(accountId: string, userId: string, token: string): void {
+  loadTokensFromDisk();
   const k = contextTokenKey(accountId, userId);
   logger.debug(`setContextToken: key=${k}`);
+  const changed = contextTokenStore.get(k) !== token;
   contextTokenStore.set(k, token);
+  if (changed) saveTokensToDisk();
 }
 
 /** Retrieve the cached context token for a given account+user pair. */
 export function getContextToken(accountId: string, userId: string): string | undefined {
+  loadTokensFromDisk();
   const k = contextTokenKey(accountId, userId);
   const val = contextTokenStore.get(k);
   logger.debug(
