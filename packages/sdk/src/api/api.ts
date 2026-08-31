@@ -88,9 +88,35 @@ function randomWechatUin(): string {
   return Buffer.from(String(uint32), "utf-8").toString("base64");
 }
 
+/**
+ * iLink 用这两个头来认客户端。**我们一直没发**，官方客户端一直在发。
+ *
+ * 为什么补上：2026-08-31 东方姐的 bot 出现"她发得进来、我们回不出去"——
+ * `sendtyping` 到了（她看得见"对方正在输入"），`sendmessage` 却一条都没到，
+ * 而两边接口都返回 ret=0。8/18 之前绑的 14 个人全都正常，8/26 之后绑的三个
+ * （贺夏雨、yiyang、东方姐）无一例外都不通。
+ *
+ * 也就是说：**旧连接像是被放行了，新连接开始被拦。** 我们和官方客户端在协议上
+ * 唯一的实质差别就是这两个头，所以先补齐它们。
+ *
+ * 值取自官方客户端 @tencent-weixin/openclaw-weixin：App-Id 是字面量 "bot"，
+ * ClientVersion 是把版本号编成 (major<<16)|(minor<<8)|patch。
+ */
+const ILINK_APP_ID = "bot";
+
+function buildClientVersion(version: string): number {
+  const [major = 0, minor = 0, patch = 0] = version.split(".").map((p) => parseInt(p, 10) || 0);
+  return ((major & 0xff) << 16) | ((minor & 0xff) << 8) | (patch & 0xff);
+}
+
+const ILINK_APP_CLIENT_VERSION = buildClientVersion("2.4.6");
+
 /** Build headers shared by both GET and POST requests. */
 function buildCommonHeaders(): Record<string, string> {
-  const headers: Record<string, string> = {};
+  const headers: Record<string, string> = {
+    "iLink-App-Id": ILINK_APP_ID,
+    "iLink-App-ClientVersion": String(ILINK_APP_CLIENT_VERSION),
+  };
   const routeTag = loadConfigRouteTag();
   if (routeTag) {
     headers.SKRouteTag = routeTag;
