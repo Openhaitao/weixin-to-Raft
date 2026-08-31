@@ -329,6 +329,40 @@ export async function getConfig(
 }
 
 /** Send a typing indicator to a user. */
+/**
+ * 告诉微信「这个 bot 上线了 / 下线了」。
+ *
+ * 官方客户端在 channel 启动和停止时各调一次，我们从来没调过 —— 而 2026-08-26 之后
+ * 新绑的三个 bot（贺夏雨、yiyang、东方姐）都是同一个症状：**用户发得进来、bot 回不出去**，
+ * `sendtyping` 到得了（对方看得见"正在输入"），`sendmessage` 一条都到不了，两边都返回 ret=0。
+ *
+ * 补齐请求头（iLink-App-Id / ClientVersion）之后仍然收不到，所以下一个怀疑对象就是它：
+ * **也许微信要先收到「我上线了」，才会把这个 bot 的消息投递给用户。**
+ *
+ * 尽力而为：失败只记一行，不能因为打招呼失败就不让 bot 干活。
+ */
+export async function notifyStart(params: WeixinApiOptions): Promise<void> {
+  await apiFetch({
+    baseUrl: params.baseUrl,
+    endpoint: "ilink/bot/msg/notifystart",
+    body: JSON.stringify({ base_info: buildBaseInfo() }),
+    token: params.token,
+    timeoutMs: params.timeoutMs ?? DEFAULT_CONFIG_TIMEOUT_MS,
+    label: "notifyStart",
+  });
+}
+
+export async function notifyStop(params: WeixinApiOptions): Promise<void> {
+  await apiFetch({
+    baseUrl: params.baseUrl,
+    endpoint: "ilink/bot/msg/notifystop",
+    body: JSON.stringify({ base_info: buildBaseInfo() }),
+    token: params.token,
+    timeoutMs: params.timeoutMs ?? DEFAULT_CONFIG_TIMEOUT_MS,
+    label: "notifyStop",
+  });
+}
+
 export async function sendTyping(
   params: WeixinApiOptions & { body: SendTypingReq },
 ): Promise<void> {

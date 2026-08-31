@@ -1,5 +1,5 @@
 import type { Agent } from "../agent/interface.js";
-import { getUpdates } from "../api/api.js";
+import { getUpdates, notifyStart } from "../api/api.js";
 import { WeixinConfigManager } from "../api/config-cache.js";
 import { SESSION_EXPIRED_ERRCODE, pauseSession, getRemainingPauseMs } from "../api/session-guard.js";
 import { processOneMessage } from "../messaging/process-message.js";
@@ -68,6 +68,12 @@ export async function monitorWeixinProvider(opts: MonitorWeixinOpts): Promise<vo
 
   log(`[weixin] monitor started (${baseUrl}, account=${accountId})`);
   aLog.info(`Monitor started: baseUrl=${baseUrl}`);
+
+  // 跟微信打个招呼：这个 bot 上线了。官方客户端每次启动都会发，我们一直没发。
+  // 尽力而为 —— 打招呼失败不该拦住 bot 干活。
+  void notifyStart({ baseUrl, token })
+    .then(() => aLog.info("notifyStart ok"))
+    .catch((err) => aLog.warn(`notifyStart failed (ignored): ${String(err)}`));
 
   const syncFilePath = getSyncBufFilePath(accountId);
   const previousGetUpdatesBuf = loadGetUpdatesBuf(syncFilePath);
