@@ -67,8 +67,22 @@ function readChannelVersion(): string {
 const CHANNEL_VERSION = readChannelVersion();
 
 /** Build the `base_info` payload included in every API request. */
+/**
+ * 每个请求都带的 base_info。
+ *
+ * 我们原来只发 `channel_version`，而且发的是**自己 package.json 的 0.5.0** ——
+ * 官方客户端发的是它自己的版本（2.4.6）**外加一个 `bot_agent`**。
+ *
+ * 也就是说，在微信眼里我们一直是一个「版本号 0.5.0、没有署名」的客户端。
+ * 8/18 之前绑的都能用、8/26 之后绑的全都发不出消息，最像的解释就是
+ * **服务端开始对新连接校验客户端身份**，而我们报的身份既旧又不完整。
+ *
+ * 所以这里对齐官方：报同一个版本号，并带上 bot_agent。
+ */
+const DEFAULT_BOT_AGENT = "OpenClaw";
+
 export function buildBaseInfo(): BaseInfo {
-  return { channel_version: CHANNEL_VERSION };
+  return { channel_version: ILINK_CHANNEL_VERSION, bot_agent: DEFAULT_BOT_AGENT };
 }
 
 /** Default timeout for long-poll getUpdates requests. */
@@ -109,7 +123,8 @@ function buildClientVersion(version: string): number {
   return ((major & 0xff) << 16) | ((minor & 0xff) << 8) | (patch & 0xff);
 }
 
-const ILINK_APP_CLIENT_VERSION = buildClientVersion("2.4.6");
+const ILINK_CHANNEL_VERSION = "2.4.6";
+const ILINK_APP_CLIENT_VERSION = buildClientVersion(ILINK_CHANNEL_VERSION);
 
 /** Build headers shared by both GET and POST requests. */
 function buildCommonHeaders(): Record<string, string> {

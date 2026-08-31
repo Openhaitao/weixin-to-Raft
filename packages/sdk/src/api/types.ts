@@ -6,6 +6,8 @@
 /** Common request metadata attached to every CGI request. */
 export interface BaseInfo {
   channel_version?: string;
+  /** 客户端署名，官方客户端固定发 "OpenClaw"。 */
+  bot_agent?: string;
 }
 
 /** proto: UploadMediaType */
