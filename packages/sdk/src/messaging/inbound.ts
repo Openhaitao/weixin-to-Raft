@@ -28,7 +28,7 @@ import { MessageItemType } from "../api/types.js";
  * The token still expires on the Weixin side (session expiry / re-login), and
  * a stale one simply fails the send — which is no worse than having none.
  */
-const contextTokenStore = new Map<string, string>();
+const contextTokenStore = new Map<string, { token: string; at: string }>();
 
 function contextTokenKey(accountId: string, userId: string): string {
   return `${accountId}:${userId}`;
@@ -54,7 +54,7 @@ function loadTokensFromDisk(): void {
     const raw = fs.readFileSync(resolveContextTokenPath(), "utf-8");
     const parsed = JSON.parse(raw) as Record<string, StoredToken>;
     for (const [key, value] of Object.entries(parsed ?? {})) {
-      if (value?.token) contextTokenStore.set(key, value.token);
+      if (value?.token) contextTokenStore.set(key, { token: value.token, at: value.at ?? new Date().toISOString() });
     }
     logger.debug(`loadTokensFromDisk: restored ${contextTokenStore.size} token(s)`);
   } catch {
@@ -65,9 +65,11 @@ function loadTokensFromDisk(): void {
 function saveTokensToDisk(): void {
   const filePath = resolveContextTokenPath();
   try {
+    // ⚠️ 每条 token 记自己的时间，不能所有 key 共用一个「现在」。
+    // 原来是后者：任何一次写盘都会把所有 token 的 at 刷成同一个时刻，
+    // 于是文件里的"年龄"是假的 —— 而我们正要靠它判断 token 还能不能用。
     const out: Record<string, StoredToken> = {};
-    const at = new Date().toISOString();
-    for (const [key, token] of contextTokenStore) out[key] = { token, at };
+    for (const [key, v] of contextTokenStore) out[key] = { token: v.token, at: v.at };
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     // temp + rename so a crash mid-write cannot leave a corrupt file behind
     const tmp = `${filePath}.tmp`;
@@ -85,9 +87,12 @@ export function setContextToken(accountId: string, userId: string, token: string
   loadTokensFromDisk();
   const k = contextTokenKey(accountId, userId);
   logger.debug(`setContextToken: key=${k}`);
-  const changed = contextTokenStore.get(k) !== token;
-  contextTokenStore.set(k, token);
-  if (changed) saveTokensToDisk();
+  const changed = contextTokenStore.get(k)?.token !== token;
+  // 只有 token 真的换了才更新时间戳：同一个 token 反复看到，不该让它"变年轻"。
+  if (changed) {
+    contextTokenStore.set(k, { token, at: new Date().toISOString() });
+    saveTokensToDisk();
+  }
 }
 
 /** Retrieve the cached context token for a given account+user pair. */
@@ -95,10 +100,13 @@ export function getContextToken(accountId: string, userId: string): string | und
   loadTokensFromDisk();
   const k = contextTokenKey(accountId, userId);
   const val = contextTokenStore.get(k);
+  // 把年龄一起记下来：每一次发送因此都成为一个「token 多老 → 成不成功」的数据点，
+  // 不用为了测有效期去额外打扰任何人。
+  const ageH = val ? ((Date.now() - Date.parse(val.at)) / 3600000).toFixed(1) : "n/a";
   logger.debug(
-    `getContextToken: key=${k} found=${val !== undefined} storeSize=${contextTokenStore.size}`,
+    `getContextToken: key=${k} found=${val !== undefined} ageHours=${ageH} storeSize=${contextTokenStore.size}`,
   );
-  return val;
+  return val?.token;
 }
 
 // ---------------------------------------------------------------------------
