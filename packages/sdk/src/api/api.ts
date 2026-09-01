@@ -14,6 +14,7 @@ import type {
   GetUpdatesReq,
   GetUpdatesResp,
   SendMessageReq,
+  SendMessageResp,
   SendTypingReq,
   GetConfigResp,
 } from "./types.js";
@@ -139,11 +140,17 @@ function buildCommonHeaders(): Record<string, string> {
   return headers;
 }
 
+/**
+ * ⚠️ 不要再手动设置 Content-Length。
+ *
+ * 官方客户端 2.4.2 专门修过这条：Node 24 自带的 undici **不允许调用方预设
+ * Content-Length**，会直接以 `UND_ERR_INVALID_ARG` 拒掉整个请求。
+ * 我们跑的正是 Node v24.17.0，而这行一直还在。交给 fetch 自己算。
+ */
 function buildHeaders(opts: { token?: string; body: string }): Record<string, string> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     AuthorizationType: "ilink_bot_token",
-    "Content-Length": String(Buffer.byteLength(opts.body, "utf-8")),
     "X-WECHAT-UIN": randomWechatUin(),
     ...buildCommonHeaders(),
   };
@@ -310,10 +317,21 @@ export async function getUploadUrl(
 }
 
 /** Send a single message downstream. */
+/**
+ * ⚠️ 必须检查 `ret`，HTTP 200 不等于消息发出去了。
+ *
+ * 2026-09-01 早上抓到实证：Claire 那条 9/1 的提醒，接口返回
+ * `status=200 raw={"ret":-2,"errmsg":"prepare failed"}` ——
+ * 我们只看 HTTP 状态码，于是把它当成成功，日志记了 FIRED、任务也从表里删掉了。
+ * **一条答应了十三天的提醒就这么没了，而后台显示一切正常。**
+ *
+ * 官方客户端 2.4.5 专门修过这条（「ret 非零时抛错，避免消息发送静默失败」），
+ * 我们一直没跟。抛出去之后，上层的重试和 FAILED 日志才有意义。
+ */
 export async function sendMessage(
   params: WeixinApiOptions & { body: SendMessageReq },
 ): Promise<void> {
-  await apiFetch({
+  const rawText = await apiFetch({
     baseUrl: params.baseUrl,
     endpoint: "ilink/bot/sendmessage",
     body: JSON.stringify({ ...params.body, base_info: buildBaseInfo() }),
@@ -321,6 +339,16 @@ export async function sendMessage(
     timeoutMs: params.timeoutMs ?? DEFAULT_API_TIMEOUT_MS,
     label: "sendMessage",
   });
+  let resp: SendMessageResp;
+  try {
+    resp = JSON.parse(rawText) as SendMessageResp;
+  } catch {
+    // 解析不了就别拦着 —— 旧行为至少不会误伤，坏的是"明确说了失败还当成功"。
+    return;
+  }
+  if (typeof resp.ret === "number" && resp.ret !== 0) {
+    throw new Error(`sendMessage ret=${resp.ret} errmsg=${resp.errmsg ?? ""}`);
+  }
 }
 
 /** Fetch bot config (includes typing_ticket) for a given user. */

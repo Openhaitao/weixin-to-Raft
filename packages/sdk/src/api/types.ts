@@ -166,6 +166,11 @@ export interface WeixinMessage {
   message_state?: number;
   item_list?: MessageItem[];
   context_token?: string;
+  /**
+   * 一次「回合」的 id。官方客户端每收到一条用户消息就生成一个 UUID，
+   * 并把它带在这一轮发出的每一条回复上；我们一直没发。
+   */
+  run_id?: string;
 }
 
 /** GetUpdates request: bytes fields are base64 strings in JSON. */
@@ -197,7 +202,10 @@ export interface SendMessageReq {
 }
 
 export interface SendMessageResp {
-  // empty
+  /** 0 = 成功。非 0 表示微信拒绝了这条消息，errmsg 说明原因。 */
+  ret?: number;
+  errmsg?: string;
+  message_id?: number;
 }
 
 /** Typing status: 1 = typing (default), 2 = cancel typing. */

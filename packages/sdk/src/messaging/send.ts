@@ -44,9 +44,10 @@ function buildTextMessageReq(params: {
   to: string;
   text: string;
   contextToken?: string;
+  runId?: string;
   clientId: string;
 }): SendMessageReq {
-  const { to, text, contextToken, clientId } = params;
+  const { to, text, contextToken, runId, clientId } = params;
   const item_list: MessageItem[] = text
     ? [{ type: MessageItemType.TEXT, text_item: { text } }]
     : [];
@@ -59,6 +60,7 @@ function buildTextMessageReq(params: {
       message_state: MessageState.FINISH,
       item_list: item_list.length ? item_list : undefined,
       context_token: contextToken ?? undefined,
+      run_id: runId ?? undefined,
     },
   };
 }
@@ -67,11 +69,12 @@ function buildTextMessageReq(params: {
 function buildSendMessageReq(params: {
   to: string;
   contextToken?: string;
+  runId?: string;
   text: string;
   clientId: string;
 }): SendMessageReq {
-  const { to, contextToken, text, clientId } = params;
-  return buildTextMessageReq({ to, text, contextToken, clientId });
+  const { to, contextToken, runId, text, clientId } = params;
+  return buildTextMessageReq({ to, text, contextToken, runId, clientId });
 }
 
 /**
@@ -81,7 +84,7 @@ function buildSendMessageReq(params: {
 export async function sendMessageWeixin(params: {
   to: string;
   text: string;
-  opts: WeixinApiOptions & { contextToken?: string };
+  opts: WeixinApiOptions & { contextToken?: string; runId?: string };
 }): Promise<{ messageId: string }> {
   const { to, text, opts } = params;
   if (!opts.contextToken) {
@@ -92,6 +95,7 @@ export async function sendMessageWeixin(params: {
   const req = buildSendMessageReq({
     to,
     contextToken: opts.contextToken,
+    runId: opts.runId,
     text,
     clientId,
   });
@@ -117,7 +121,7 @@ async function sendMediaItems(params: {
   to: string;
   text: string;
   mediaItem: MessageItem;
-  opts: WeixinApiOptions & { contextToken?: string };
+  opts: WeixinApiOptions & { contextToken?: string; runId?: string };
   label: string;
 }): Promise<{ messageId: string }> {
   const { to, text, mediaItem, opts, label } = params;
@@ -174,7 +178,7 @@ export async function sendImageMessageWeixin(params: {
   to: string;
   text: string;
   uploaded: UploadedFileInfo;
-  opts: WeixinApiOptions & { contextToken?: string };
+  opts: WeixinApiOptions & { contextToken?: string; runId?: string };
 }): Promise<{ messageId: string }> {
   const { to, text, uploaded, opts } = params;
   if (!opts.contextToken) {
@@ -209,7 +213,7 @@ export async function sendVideoMessageWeixin(params: {
   to: string;
   text: string;
   uploaded: UploadedFileInfo;
-  opts: WeixinApiOptions & { contextToken?: string };
+  opts: WeixinApiOptions & { contextToken?: string; runId?: string };
 }): Promise<{ messageId: string }> {
   const { to, text, uploaded, opts } = params;
   if (!opts.contextToken) {
@@ -242,7 +246,7 @@ export async function sendFileMessageWeixin(params: {
   text: string;
   fileName: string;
   uploaded: UploadedFileInfo;
-  opts: WeixinApiOptions & { contextToken?: string };
+  opts: WeixinApiOptions & { contextToken?: string; runId?: string };
 }): Promise<{ messageId: string }> {
   const { to, text, fileName, uploaded, opts } = params;
   if (!opts.contextToken) {
